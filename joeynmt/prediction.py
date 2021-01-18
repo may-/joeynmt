@@ -252,7 +252,6 @@ def parse_test_args(cfg, mode="test"):
 # pylint: disable-msg=logging-too-many-args
 def test(cfg_file,
          ckpt: str,
-         batch_class: Batch = Batch,
          output_path: str = None,
          save_attention: bool = False,
          datasets: dict = None) -> None:
@@ -262,7 +261,6 @@ def test(cfg_file,
 
     :param cfg_file: path to configuration file
     :param ckpt: path to checkpoint to load
-    :param batch_class: class type of batch
     :param output_path: path to output
     :param datasets: datasets to predict
     :param save_attention: whether to save the computed attention weights
@@ -323,7 +321,7 @@ def test(cfg_file,
         score, loss, ppl, sources, sources_raw, references, hypotheses, \
         hypotheses_raw, attention_scores = validate_on_data(
             model, data=data_set, batch_size=batch_size,
-            batch_class=batch_class, batch_type=batch_type, level=level,
+            batch_class=Batch, batch_type=batch_type, level=level,
             max_output_length=max_output_length, eval_metric=eval_metric,
             use_cuda=use_cuda, compute_loss=False, beam_size=beam_size,
             beam_alpha=beam_alpha, postprocess=postprocess,
@@ -365,8 +363,7 @@ def test(cfg_file,
 
 def translate(cfg_file: str,
               ckpt: str,
-              output_path: str = None,
-              batch_class: Batch = Batch) -> None:
+              output_path: str = None) -> None:
     """
     Interactive translation function.
     Loads model from checkpoint and translates either the stdin input or
@@ -378,7 +375,6 @@ def translate(cfg_file: str,
     :param cfg_file: path to configuration file
     :param ckpt: path to checkpoint to load
     :param output_path: path to output file
-    :param batch_class: class type of batch
     """
 
     def _load_line_as_data(line):
@@ -405,7 +401,7 @@ def translate(cfg_file: str,
         score, loss, ppl, sources, sources_raw, references, hypotheses, \
         hypotheses_raw, attention_scores = validate_on_data(
             model, data=test_data, batch_size=batch_size,
-            batch_class=batch_class, batch_type=batch_type, level=level,
+            batch_class=Batch, batch_type=batch_type, level=level,
             max_output_length=max_output_length, eval_metric="",
             use_cuda=use_cuda, compute_loss=False, beam_size=beam_size,
             beam_alpha=beam_alpha, postprocess=postprocess,

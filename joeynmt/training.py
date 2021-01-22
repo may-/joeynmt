@@ -167,6 +167,7 @@ class TrainManager:
                                      "Valid options: 'word', 'bpe', 'char'.")
         self.shuffle = train_config.get("shuffle", True)
         self.epochs = train_config["epochs"]
+        self.max_updates = train_config.get("updates", np.inf)
         self.batch_size = train_config["batch_size"]
         # Placeholder so that we can use the train_iter in other functions.
         self.train_iter, self.train_iter_state = None, None
@@ -206,7 +207,8 @@ class TrainManager:
         # initialize training statistics
         self.stats = self.TrainStatistics(
             steps=0,
-            stop=False,
+            is_min_lr=False,
+            is_max_update=False,
             total_tokens=0,
             best_ckpt_iter=0,
             best_ckpt_score=np.inf if self.minimize_metric else -np.inf,
@@ -462,6 +464,8 @@ class TrainManager:
 
                     # increment step counter
                     self.stats.steps += 1
+                    if self.stats.steps >= self.max_updates:
+                        self.stats.is_max_update = True
 
                     # log learning progress
                     if self.stats.steps % self.logging_freq == 0:
@@ -490,11 +494,18 @@ class TrainManager:
                         valid_duration = self._validate(valid_data, epoch_no)
                         total_valid_duration += valid_duration
 
-                if self.stats.stop:
+                if self.stats.is_min_lr or self.stats.is_max_update:
                     break
-            if self.stats.stop:
-                logger.info('Training ended since minimum lr %f was reached.',
-                            self.learning_rate_min)
+
+            if self.stats.is_min_lr:
+                logger.info(
+                    'Training ended since minimum lr %f was reached.',
+                    self.learning_rate_min)
+                break
+            elif self.stats.is_max_update:
+                logger.info(
+                    'Training ended since maximum num. of updates %d was reached.',
+                    self.max_updates)
                 break
 
             logger.info('Epoch %3d: total training loss %.2f', epoch_no + 1,
@@ -671,7 +682,7 @@ class TrainManager:
         current_lr = self.optimizer.param_groups[0]['lr']
 
         if current_lr < self.learning_rate_min:
-            self.stats.stop = True
+            self.stats.is_min_lr = True
 
         with open(self.valid_report_file, 'a') as opened_file:
             score_str = "\t"
@@ -747,7 +758,8 @@ class TrainManager:
     class TrainStatistics:
         def __init__(self,
                      steps: int = 0,
-                     stop: bool = False,
+                     is_min_lr: bool = False,
+                     is_max_update: bool = False,
                      total_tokens: int = 0,
                      best_ckpt_iter: int = 0,
                      best_ckpt_score: float = np.inf,
@@ -756,7 +768,10 @@ class TrainManager:
             self.steps = steps
             # stop training if this flag is True
             # by reaching learning rate minimum
-            self.stop = stop
+            self.is_min_lr = is_min_lr
+            # stop training if this flag is True
+            # by reaching max num of updates
+            self.is_max_update = is_max_update
             # number of total tokens seen so far
             self.total_tokens = total_tokens
             # store iteration point of best ckpt

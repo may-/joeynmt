@@ -440,7 +440,7 @@ class TrainManager:
                     # decay lr
                     if self.scheduler is not None \
                             and self.scheduler_step_at == "step":
-                        self.scheduler.step()
+                        self.scheduler.step(self.stats.steps)
 
                     # reset gradients
                     self.model.zero_grad()
@@ -641,10 +641,11 @@ class TrainManager:
         :param eval_metric: evaluation metric, e.g. "bleu"
         :param new_best: whether this is a new best model
         """
-        current_lr = -1
+        #current_lr = -1
         # ignores other param groups for now
-        for param_group in self.optimizer.param_groups:
-            current_lr = param_group['lr']
+        #for param_group in self.optimizer.param_groups:
+        #    current_lr = param_group['lr']
+        current_lr = self.optimizer.param_groups[0]['lr']
 
         if current_lr < self.learning_rate_min:
             self.stats.stop = True

@@ -7,13 +7,15 @@ import sys
 from typing import List, Optional
 import logging
 import numpy as np
+from collections import defaultdict
 
 import torch
 from torchtext.data import Dataset, Field
 
 from joeynmt.helpers import bpe_postprocess, load_config, make_logger,\
     get_latest_checkpoint, load_checkpoint, store_attention_plots
-from joeynmt.metrics import bleu, chrf, token_accuracy, sequence_accuracy
+from joeynmt.metrics import bleu, chrf, token_accuracy, sequence_accuracy, wer, \
+    EvaluationTokenizer
 from joeynmt.model import build_model, Model, _DataParallel
 from joeynmt.search import run_batch
 from joeynmt.batch import Batch
@@ -28,7 +30,7 @@ logger = logging.getLogger(__name__)
 def validate_on_data(model: Model, data: Dataset,
                      batch_size: int,
                      use_cuda: bool, max_output_length: int,
-                     level: str, eval_metric: Optional[str],
+                     level: str, eval_metrics: Optional[List[str]],
                      n_gpu: int,
                      batch_class: Batch = Batch,
                      compute_loss: bool = False,
@@ -51,7 +53,7 @@ def validate_on_data(model: Model, data: Dataset,
     :param use_cuda: if True, use CUDA
     :param max_output_length: maximum length for generated hypotheses
     :param level: segmentation level, one of "char", "bpe", "word"
-    :param eval_metric: evaluation metric, e.g. "bleu"
+    :param eval_metrics: list of evaluation metric, e.g. ["bleu"]
     :param n_gpu: number of GPUs
     :param compute_loss: whether to computes a scalar loss
         for given inputs and targets
@@ -65,7 +67,7 @@ def validate_on_data(model: Model, data: Dataset,
     :param sacrebleu: sacrebleu options
 
     :return:
-        - current_valid_score: current validation score [eval_metric],
+        - current_valid_scores: (dict) current validation score [eval_metric],
         - valid_loss: validation loss,
         - valid_ppl:, validation perplexity,
         - valid_sources: validation sources,
@@ -77,7 +79,10 @@ def validate_on_data(model: Model, data: Dataset,
     """
     assert batch_size >= n_gpu, "batch_size must be bigger than n_gpu."
     if sacrebleu is None:   # assign default value
-        sacrebleu = {"remove_whitespace": True, "tokenize": "13a"}
+        sacrebleu = {"remove_whitespace": True,
+                     "remove_punctuation": True,
+                     "tokenize": "13a",
+                     "tok_fun": lambda s: list(s) if level=="char" else s.split()}
     if batch_size > 1000 and batch_type == "sentence":
         logger.warning(
             "WARNING: Are you sure you meant to work on huge batches like "
@@ -159,25 +164,29 @@ def validate_on_data(model: Model, data: Dataset,
         if valid_references:
             assert len(valid_hypotheses) == len(valid_references)
 
-            current_valid_score = 0
-            if eval_metric.lower() == 'bleu':
-                # this version does not use any tokenization
-                current_valid_score = bleu(
-                    valid_hypotheses, valid_references,
-                    tokenize=sacrebleu["tokenize"])
-            elif eval_metric.lower() == 'chrf':
-                current_valid_score = chrf(valid_hypotheses, valid_references,
-                    remove_whitespace=sacrebleu["remove_whitespace"])
-            elif eval_metric.lower() == 'token_accuracy':
-                current_valid_score = token_accuracy(   # supply List[List[str]]
-                    list(decoded_valid), list(data.trg))
-            elif eval_metric.lower() == 'sequence_accuracy':
-                current_valid_score = sequence_accuracy(
-                    valid_hypotheses, valid_references)
+            current_valid_scores = defaultdict(float)
+            for eval_metric in eval_metrics:
+                if eval_metric.lower() == 'bleu':
+                    # this version does not use any tokenization
+                    current_valid_scores[eval_metric] = bleu(
+                        valid_hypotheses, valid_references,
+                        tokenize=sacrebleu["tokenize"])
+                elif eval_metric.lower() == 'chrf':
+                    current_valid_scores[eval_metric] = chrf(valid_hypotheses, valid_references,
+                        remove_whitespace=sacrebleu["remove_whitespace"])
+                elif eval_metric.lower() == 'token_accuracy':
+                    current_valid_scores[eval_metric] = token_accuracy(   # supply List[List[str]]
+                        list(decoded_valid), list(data.trg))
+                elif eval_metric.lower() == 'sequence_accuracy':
+                    current_valid_scores[eval_metric] = sequence_accuracy(
+                        valid_hypotheses, valid_references)
+                elif eval_metric.lower() == 'wer':
+                    current_valid_scores[eval_metric] = wer(valid_hypotheses, valid_references,
+                        tokenizer=sacrebleu["tok_fun"], avg="macro")
         else:
-            current_valid_score = -1
+            current_valid_scores = None
 
-    return current_valid_score, valid_loss, valid_ppl, valid_sources, \
+    return current_valid_scores, valid_loss, valid_ppl, valid_sources, \
         valid_sources_raw, valid_references, valid_hypotheses, \
         decoded_valid, valid_attention_scores
 
@@ -206,13 +215,13 @@ def parse_test_args(cfg, mode="test"):
         logger.info("Process device: %s, n_gpu: %d, "
                     "batch_size per device: %d (with beam_size)",
                     device, n_gpu, batch_per_device)
-        eval_metric = cfg["training"]["eval_metric"]
+        eval_metrics = [s.strip().lower() for s in cfg["training"]["eval_metrics"].split(",") if len(s.strip()) > 0]
 
     elif mode == 'translate':
         # in multi-gpu, batch_size must be bigger than n_gpu!
         n_gpu = 1 if use_cuda else 0
         logger.debug("Process device: %s, n_gpu: %d", device, n_gpu)
-        eval_metric = ""
+        eval_metrics = []
 
     level = cfg["data"]["level"]
     max_output_length = cfg["training"].get("max_output_length", None)
@@ -223,28 +232,43 @@ def parse_test_args(cfg, mode="test"):
         beam_alpha = cfg["testing"].get("alpha", -1)
         postprocess = cfg["testing"].get("postprocess", True)
         bpe_type = cfg["testing"].get("bpe_type", "subword-nmt")
-        sacrebleu = {"remove_whitespace": True, "tokenize": "13a"}
+        sacrebleu = {"remove_whitespace": True,
+                     "remove_punctuation": True,
+                     "tokenize": "13a",
+                     "tok_fun": lambda s: list(s) if level=="char" else s.split()}
         if "sacrebleu" in cfg["testing"].keys():
             sacrebleu["remove_whitespace"] = cfg["testing"]["sacrebleu"] \
                 .get("remove_whitespace", True)
+            sacrebleu["remove_punctuation"] = cfg["testing"]["sacrebleu"] \
+                .get("remove_punctuation", True)
             sacrebleu["tokenize"] = cfg["testing"]["sacrebleu"] \
                 .get("tokenize", "13a")
+        if "wer" in eval_metrics:
+            eval_tokenizer = EvaluationTokenizer(
+                tokenize=sacrebleu["tokenize"], #["none", "13a", "intl", "zh", "ja-mecab"]
+                lowercase=cfg["data"].get("lowercase", False),
+                remove_punctuation=sacrebleu["tokenize"],
+                level=level)
+            sacrebleu["tok_fun"] = eval_tokenizer.tokenize
 
     else:
         beam_size = 1
         beam_alpha = -1
         postprocess = True
         bpe_type = "subword-nmt"
-        sacrebleu = {"remove_whitespace": True, "tokenize": "13a"}
+        sacrebleu = {"remove_whitespace": True,
+                     "remove_punctuation": True,
+                     "tokenize": "13a",
+                     "tok_fun": lambda s: list(s) if level=="char" else s.split()}
 
     decoding_description = "Greedy decoding" if beam_size < 2 else \
         "Beam search decoding with beam size = {} and alpha = {}". \
             format(beam_size, beam_alpha)
-    tokenizer_info = f"[{sacrebleu['tokenize']}]" \
-        if eval_metric == "bleu" else ""
+    tokenizer_info = f"{sacrebleu['tokenize']}" \
+        if "bleu" in eval_metrics or "wer" in eval_metrics else ""
 
     return batch_size, batch_type, use_cuda, device, n_gpu, level, \
-           eval_metric, max_output_length, beam_size, beam_alpha, \
+           eval_metrics, max_output_length, beam_size, beam_alpha, \
            postprocess, bpe_type, sacrebleu, decoding_description, \
            tokenizer_info
 
@@ -291,7 +315,7 @@ def test(cfg_file,
         trg_vocab = datasets["trg_vocab"]
 
     # parse test args
-    batch_size, batch_type, use_cuda, device, n_gpu, level, eval_metric, \
+    batch_size, batch_type, use_cuda, device, n_gpu, level, eval_metrics, \
         max_output_length, beam_size, beam_alpha, postprocess, \
         bpe_type, sacrebleu, decoding_description, tokenizer_info \
         = parse_test_args(cfg, mode="test")
@@ -318,20 +342,24 @@ def test(cfg_file,
         logger.info("Decoding on %s set (%s)...", data_set_name, dataset_file)
 
         #pylint: disable=unused-variable
-        score, loss, ppl, sources, sources_raw, references, hypotheses, \
+        scores, loss, ppl, sources, sources_raw, references, hypotheses, \
         hypotheses_raw, attention_scores = validate_on_data(
             model, data=data_set, batch_size=batch_size,
             batch_class=Batch, batch_type=batch_type, level=level,
-            max_output_length=max_output_length, eval_metric=eval_metric,
+            max_output_length=max_output_length, eval_metrics=eval_metrics,
             use_cuda=use_cuda, compute_loss=False, beam_size=beam_size,
             beam_alpha=beam_alpha, postprocess=postprocess,
             bpe_type=bpe_type, sacrebleu=sacrebleu, n_gpu=n_gpu)
         #pylint: enable=unused-variable
 
         if "trg" in data_set.fields:
-            logger.info("%4s %s%s: %6.2f [%s]",
-                        data_set_name, eval_metric, tokenizer_info,
-                        score, decoding_description)
+            info_str = "%4s" % (data_set_name)
+            for i, eval_metric in enumerate(eval_metrics):
+                info_str += f" {eval_metric}" if i==0 else f", {eval_metric}"
+                if eval_metric == "bleu" or eval_metric == "wer":
+                    info_str += f"[{tokenizer_info}]"
+                info_str += " : %6.2f" % (scores[eval_metric])
+            logger.info(f"{info_str} ({decoding_description})")
         else:
             logger.info("No references given for %s -> no evaluation.",
                         data_set_name)
@@ -398,11 +426,11 @@ def translate(cfg_file: str,
     def _translate_data(test_data):
         """ Translates given dataset, using parameters from outer scope. """
         # pylint: disable=unused-variable
-        score, loss, ppl, sources, sources_raw, references, hypotheses, \
+        scores, loss, ppl, sources, sources_raw, references, hypotheses, \
         hypotheses_raw, attention_scores = validate_on_data(
             model, data=test_data, batch_size=batch_size,
             batch_class=Batch, batch_type=batch_type, level=level,
-            max_output_length=max_output_length, eval_metric="",
+            max_output_length=max_output_length, eval_metrics=[],
             use_cuda=use_cuda, compute_loss=False, beam_size=beam_size,
             beam_alpha=beam_alpha, postprocess=postprocess,
             bpe_type=bpe_type, sacrebleu=sacrebleu, n_gpu=n_gpu)

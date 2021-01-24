@@ -2,9 +2,11 @@
 """
 This module holds various MT evaluation metrics.
 """
+import unicodedata
 
 from typing import List
 import sacrebleu
+import editdistance
 
 
 def chrf(hypotheses, references, remove_whitespace=True):
@@ -69,3 +71,85 @@ def sequence_accuracy(hypotheses, references):
     correct_sequences = sum([1 for (hyp, ref) in zip(hypotheses, references)
                              if hyp == ref])
     return (correct_sequences / len(hypotheses))*100 if hypotheses else 0.0
+
+
+def wer(hypotheses, references, tokenizer=None, avg="macro"):
+    """
+    Compute word error rate
+
+    :param hypotheses: list of hypotheses (strings)
+    :param references: list of references (strings)
+    :param tokenizer: tokenize function (callable)
+    :return: normalized word error rate
+    """
+    numerator = 0.0
+    denominator = 0.0
+    if avg == "micro":    # micro average
+        for hyp, ref in zip(hypotheses, references):
+            wer = editdistance.eval(tokenizer(hyp), tokenizer(ref)) / len(tokenizer(ref))
+            numerator += max(wer, 1.0) # can be `wer > 1` if `len(hyp) > len(ref)`
+            denominator += 1.0
+    elif avg == "macro":  # macro average
+        for hyp, ref in zip(hypotheses, references):
+            numerator += editdistance.eval(tokenizer(hyp), tokenizer(ref))
+            denominator += len(tokenizer(ref))
+    return (numerator / denominator) * 100 if denominator else 0.0
+
+# from fairseq
+class EvaluationTokenizer(object):
+    """A generic evaluation-time tokenizer, which leverages built-in tokenizers
+    in sacreBLEU (https://github.com/mjpost/sacrebleu). It additionally provides
+    lowercasing, punctuation removal and character tokenization, which are
+    applied after sacreBLEU tokenization.
+
+    :param tokenize: (str) the type of sacreBLEU tokenizer to apply.
+    :param lowercase: (bool) lowercase the text.
+    :param remove_punctuation: (bool) remove punctuation (based on unicode
+        category) from text.
+    :param level: (str) tokenization level. {"word", "bpe", "char"}
+    """
+
+    SPACE = chr(32)
+    SPACE_ESCAPE = chr(9601)
+    ALL_TOKENIZER_TYPES = ["none", "13a", "intl", "zh", "ja-mecab"]
+
+    def __init__(
+            self,
+            tokenize: str = "13a",
+            lowercase: bool = False,
+            remove_punctuation: bool = False,
+            level: str = "word",
+    ):
+        from sacrebleu.tokenizers import TOKENIZERS
+
+        assert tokenize in self.ALL_TOKENIZER_TYPES, f"{tokenize}, {TOKENIZERS}"
+        self.lowercase = lowercase
+        self.remove_punctuation = remove_punctuation
+        self.character_tokenization = (level == "char")
+        self.tokenizer = TOKENIZERS[tokenize]
+
+    @classmethod
+    def remove_punc(cls, sent: str):
+        """Remove punctuation based on Unicode category."""
+        return cls.SPACE.join(
+            t
+            for t in sent.split(cls.SPACE)
+            if not all(unicodedata.category(c)[0] == "P" for c in t)
+        )
+
+    def tokenize(self, sent: str):
+        tokenized = self.tokenizer()(sent)
+
+        if self.remove_punctuation:
+            tokenized = self.remove_punc(tokenized)
+
+        if self.character_tokenization:
+            tokenized = self.SPACE.join(
+                list(tokenized.replace(self.SPACE, self.SPACE_ESCAPE))
+            )
+
+        if self.lowercase:
+            tokenized = tokenized.lower()
+
+        return tokenized
+

@@ -26,6 +26,7 @@ testing:                            # specify which inference algorithm to use f
     bpe_type: "subword-nmt"         # bpe type: either "subword-nmt" or "sentencepiece" (default: subword-nmt; used in postprocess during evaluation)
     sacrebleu:                      # sacrebleu options
         remove_whitespace: True     # `remove_whitespace` option in sacrebleu.corpus_chrf() function (defalut: True)
+        remove_punctuation: True    # whether to remove punctuation (default: True, used for WER)
         tokenize: "13a"             # `tokenize` option in sacrebleu.corpus_bleu() function (default: 13a)
 
 training:                           # specify training details here
@@ -55,8 +56,8 @@ training:                           # specify training details here
     epochs: 1                       # train for this many epochs
     validation_freq: 10             # validate after this many updates (number of mini-batches), default: 1000
     logging_freq: 10                # log the training progress after this many updates, default: 100
-    eval_metric: "bleu"             # validation metric, default: "bleu", other options: "chrf", "token_accuracy", "sequence_accuracy"
-    early_stopping_metric: "loss"   # when a new high score on this metric is achieved, a checkpoint is written, when "eval_metric" (default) is maximized, when "loss" or "ppl" is minimized
+    eval_metrics: "bleu,token_accuracy"             # list of validation metrics separated by commas, default: "bleu", other options: "chrf", "token_accuracy", "sequence_accuracy"
+    early_stopping_metric: "loss"   # when a new high score on this metric is achieved, a checkpoint is written, when "eval_metric" (the first one in the list above) is maximized, when "loss" or "ppl" is minimized
     model_dir: "models/small_model" # directory where models and validation results are stored, required
     overwrite: True                 # overwrite existing model directory, default: False. Do not set to True unless for debugging!
     shuffle: True                   # shuffle the training data, default: True

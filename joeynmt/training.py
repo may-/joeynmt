@@ -99,13 +99,17 @@ class TrainManager:
         maxlen = train_config.get("keep_last_ckpts", 5)
         self.ckpt_queue = collections.deque(
             maxlen=maxlen if maxlen > 0 else None)
-        self.eval_metric = train_config.get("eval_metric", "bleu")
-        if self.eval_metric not in [
-                'bleu', 'chrf', 'token_accuracy', 'sequence_accuracy'
-        ]:
-            raise ConfigurationError("Invalid setting for 'eval_metric', "
-                                     "valid options: 'bleu', 'chrf', "
-                                     "'token_accuracy', 'sequence_accuracy'.")
+        metrics = train_config.get("eval_metrics", "").split(",")
+        self.eval_metrics = [s.strip().lower() for s in metrics if len(s.strip()) > 0]
+        #backward compatibility
+        if len(self.eval_metrics) == 0 and "eval_metric" in train_config.keys():
+            self.eval_metrics = [train_config.get("eval_metric", "bleu").strip().lower()]
+        assert len(self.eval_metrics) > 0
+        for eval_metric in self.eval_metrics:
+            if eval_metric not in ['bleu', 'chrf', 'token_accuracy', 'sequence_accuracy', 'wer']:
+                raise ConfigurationError("Invalid setting for 'eval_metric', "
+                                         "valid options: 'bleu', 'chrf', "
+                                         "'token_accuracy', 'sequence_accuracy', 'wer'.")
         self.early_stopping_metric = train_config.get("early_stopping_metric",
                                                       "eval_metric")
 
@@ -116,11 +120,11 @@ class TrainManager:
         if self.early_stopping_metric in ["ppl", "loss"]:
             self.minimize_metric = True
         elif self.early_stopping_metric == "eval_metric":
-            if self.eval_metric in [
+            if self.eval_metrics[0] in [
                     "bleu", "chrf", "token_accuracy", "sequence_accuracy"
             ]:
                 self.minimize_metric = False
-            # eval metric that has to get minimized (not yet implemented)
+            # eval metric that has to get minimized: wer
             else:
                 self.minimize_metric = True
         else:
@@ -131,12 +135,23 @@ class TrainManager:
         # eval options
         test_config = config["testing"]
         self.bpe_type = test_config.get("bpe_type", "subword-nmt")
-        self.sacrebleu = {"remove_whitespace": True, "tokenize": "13a"}
+        self.sacrebleu = {
+            "remove_whitespace": True, "remove_punctuation": True, "tokenize": "13a",
+            "tok_fun": lambda s: list(s) if config["data"]["level"]=="char" else s.split()}
         if "sacrebleu" in config["testing"].keys():
             self.sacrebleu["remove_whitespace"] = test_config["sacrebleu"] \
                 .get("remove_whitespace", True)
+            self.sacrebleu["remove_punctuation"] = test_config["sacrebleu"] \
+                .get("remove_punctuation", True)
             self.sacrebleu["tokenize"] = test_config["sacrebleu"] \
                 .get("tokenize", "13a")
+        if "wer" in self.eval_metrics:
+            eval_tokenizer = EvaluationTokenizer(
+                tokenize=self.sacrebleu["tokenize"], #["none", "13a", "intl", "zh", "ja-mecab"]
+                lowercase=config["data"].get("lowercase", False),
+                remove_punctuation=self.sacrebleu["tokenize"],
+                level=config["data"]["level"])
+            self.sacrebleu["tok_fun"] = eval_tokenizer.tokenize
 
         # learning rate scheduling
         self.scheduler, self.scheduler_step_at = build_scheduler(
@@ -450,6 +465,8 @@ class TrainManager:
 
                     # log learning progress
                     if self.stats.steps % self.logging_freq == 0:
+                        self.tb_writer.add_scalar("learning_rate/learning_rate",
+                            self.optimizer.param_groups[0]["lr"], self.stats.steps)
                         self.tb_writer.add_scalar("train/train_batch_loss",
                                                   batch_loss, self.stats.steps)
                         elapsed = time.time() - start - total_valid_duration
@@ -486,7 +503,7 @@ class TrainManager:
             logger.info('Training ended after %3d epochs.', epoch_no + 1)
         logger.info('Best validation result (greedy) at step %8d: %6.2f %s.',
                     self.stats.best_ckpt_iter, self.stats.best_ckpt_score,
-                    self.early_stopping_metric)
+                    self.eval_metrics[0] if self.early_stopping_metric == "eval_metric" else self.early_stopping_metric)
 
         self.tb_writer.close()  # close Tensorboard writer
 
@@ -541,14 +558,14 @@ class TrainManager:
     def _validate(self, valid_data, epoch_no):
         valid_start_time = time.time()
 
-        valid_score, valid_loss, valid_ppl, valid_sources, \
+        valid_scores, valid_loss, valid_ppl, valid_sources, \
         valid_sources_raw, valid_references, valid_hypotheses, \
         valid_hypotheses_raw, valid_attention_scores = \
             validate_on_data(
                 batch_size=self.eval_batch_size,
                 batch_class=self.batch_class,
                 data=valid_data,
-                eval_metric=self.eval_metric,
+                eval_metrics=self.eval_metrics,
                 level=self.level, model=self.model,
                 use_cuda=self.use_cuda,
                 max_output_length=self.max_output_length,
@@ -561,19 +578,21 @@ class TrainManager:
                 n_gpu=self.n_gpu
             )
 
-        self.tb_writer.add_scalar("valid/valid_loss", valid_loss,
-                                  self.stats.steps)
-        self.tb_writer.add_scalar("valid/valid_score", valid_score,
-                                  self.stats.steps)
-        self.tb_writer.add_scalar("valid/valid_ppl", valid_ppl,
-                                  self.stats.steps)
+
+        self.tb_writer.add_scalar(
+            "valid/valid_loss", valid_loss, self.stats.steps)
+        for eval_metric in self.eval_metrics:
+            self.tb_writer.add_scalar(
+                f"valid/valid_{eval_metric}", valid_scores[eval_metric], self.stats.steps)
+        self.tb_writer.add_scalar(
+            "valid/valid_ppl", valid_ppl, self.stats.steps)
 
         if self.early_stopping_metric == "loss":
             ckpt_score = valid_loss
         elif self.early_stopping_metric in ["ppl", "perplexity"]:
             ckpt_score = valid_ppl
         else:
-            ckpt_score = valid_score
+            ckpt_score = valid_scores[self.eval_metrics[0]]
 
         if self.scheduler is not None \
                 and self.scheduler_step_at == "validation":
@@ -584,17 +603,17 @@ class TrainManager:
             self.stats.best_ckpt_score = ckpt_score
             self.stats.best_ckpt_iter = self.stats.steps
             logger.info('Hooray! New best validation result [%s]!',
-                        self.early_stopping_metric)
+                self.eval_metrics[0] if (self.early_stopping_metric == 'eval_metric') else self.early_stopping_metric)
             new_best = True
             self._save_checkpoint(new_best)
         elif self.save_latest_checkpoint:
             self._save_checkpoint(new_best)
 
         # append to validation report
-        self._add_report(valid_score=valid_score,
+        self._add_report(valid_scores=valid_scores,
                          valid_loss=valid_loss,
                          valid_ppl=valid_ppl,
-                         eval_metric=self.eval_metric,
+                         eval_metrics=self.eval_metrics,
                          new_best=new_best)
 
         self._log_examples(sources_raw=[v for v in valid_sources_raw],
@@ -604,11 +623,15 @@ class TrainManager:
                            references=valid_references)
 
         valid_duration = time.time() - valid_start_time
+        score_str = ""
+        for i, eval_metric in enumerate(self.eval_metrics):
+            score_str += "" if i==0 else ", "
+            score_str += "%s: %6.2f" % (eval_metric, valid_scores[eval_metric])
         logger.info(
             'Validation result (greedy) at epoch %3d, '
-            'step %8d: %s: %6.2f, loss: %8.4f, ppl: %8.4f, '
-            'duration: %.4fs', epoch_no + 1, self.stats.steps, self.eval_metric,
-            valid_score, valid_loss, valid_ppl, valid_duration)
+            'step %8d: %s, loss: %8.4f, ppl: %8.4f, '
+            'duration: %.4fs', epoch_no + 1, self.stats.steps,
+            score_str, valid_loss, valid_ppl, valid_duration)
 
         # store validation set outputs
         self._store_outputs(valid_hypotheses)
@@ -627,18 +650,18 @@ class TrainManager:
         return valid_duration
 
     def _add_report(self,
-                    valid_score: float,
+                    valid_scores: float,
                     valid_ppl: float,
                     valid_loss: float,
-                    eval_metric: str,
+                    eval_metrics: List[str],
                     new_best: bool = False) -> None:
         """
         Append a one-line report to validation logging file.
 
-        :param valid_score: validation evaluation score [eval_metric]
+        :param valid_scores: (dict) validation evaluation scores [eval_metrics]
         :param valid_ppl: validation perplexity
         :param valid_loss: validation loss (sum over whole validation set)
-        :param eval_metric: evaluation metric, e.g. "bleu"
+        :param eval_metrics: evaluation metric, e.g. "bleu"
         :param new_best: whether this is a new best model
         """
         #current_lr = -1
@@ -651,11 +674,14 @@ class TrainManager:
             self.stats.stop = True
 
         with open(self.valid_report_file, 'a') as opened_file:
+            score_str = "\t"
+            for eval_metric in eval_metrics:
+                score_str += "{}: {:.5f}\t".format(eval_metric, valid_scores[eval_metric])
             opened_file.write(
-                "Steps: {}\tLoss: {:.5f}\tPPL: {:.5f}\t{}: {:.5f}\t"
-                "LR: {:.8f}\t{}\n".format(self.stats.steps, valid_loss,
-                                          valid_ppl, eval_metric, valid_score,
-                                          current_lr, "*" if new_best else ""))
+                "Steps: {}\tLoss: {:.5f}\tPPL: {:.5f}{}"
+                "LR: {:.8f}\t{}\n".format(
+                    self.stats.steps, valid_loss, valid_ppl, score_str,
+                    current_lr, "*" if new_best else ""))
 
     def _log_parameters_list(self) -> None:
         """

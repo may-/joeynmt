@@ -66,7 +66,7 @@ def make_logger(log_dir: str = None, mode: str = "train") -> str:
 
         if log_dir is not None:
             if os.path.exists(log_dir):
-                log_file = f'{log_dir}/{mode}.log'
+                log_file = os.path.join(log_dir, f'{mode}.log')
 
                 fh = logging.FileHandler(log_file)
                 fh.setLevel(level=logging.DEBUG)
@@ -255,7 +255,7 @@ def get_latest_checkpoint(ckpt_dir: str) -> Optional[str]:
     :param ckpt_dir:
     :return: latest checkpoint file
     """
-    list_of_files = glob.glob("{}/*.ckpt".format(ckpt_dir))
+    list_of_files = glob.glob(os.path.join(ckpt_dir, "*.ckpt"))
     latest_checkpoint = None
     if list_of_files:
         latest_checkpoint = max(list_of_files, key=os.path.getctime)

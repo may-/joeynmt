@@ -300,7 +300,7 @@ def test(cfg_file,
     if ckpt is None:
         ckpt = get_latest_checkpoint(model_dir)
         try:
-            step = ckpt.split(model_dir+"/")[1].split(".ckpt")[0]
+            step = os.path.split(ckpt)[1].split(".ckpt")[0]
         except IndexError:
             step = "best"
 
@@ -447,8 +447,8 @@ def translate(cfg_file: str,
         ckpt = get_latest_checkpoint(model_dir)
 
     # read vocabs
-    src_vocab_file = cfg["data"].get("src_vocab", model_dir + "/src_vocab.txt")
-    trg_vocab_file = cfg["data"].get("trg_vocab", model_dir + "/trg_vocab.txt")
+    src_vocab_file = cfg["data"].get("src_vocab", os.path.join(model_dir, "src_vocab.txt"))
+    trg_vocab_file = cfg["data"].get("trg_vocab", os.path.join(model_dir, "trg_vocab.txt"))
     src_vocab = Vocabulary(file=src_vocab_file)
     trg_vocab = Vocabulary(file=trg_vocab_file)
 

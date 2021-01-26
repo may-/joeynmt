@@ -68,8 +68,9 @@ class TrainManager:
         assert os.path.exists(self.model_dir)
 
         self.logging_freq = train_config.get("logging_freq", 100)
-        self.valid_report_file = "{}/validations.txt".format(self.model_dir)
-        self.tb_writer = SummaryWriter(log_dir=self.model_dir + "/tensorboard/")
+        self.valid_report_file = os.path.join(self.model_dir, "validations.txt")
+        self.tb_writer = SummaryWriter(
+            log_dir=os.path.join(self.model_dir, "tensorboard"))
 
         self.save_latest_checkpoint = train_config.get("save_latest_ckpt", True)
 
@@ -226,8 +227,7 @@ class TrainManager:
         :param new_best: This boolean signals which symlink we will use for the
           new checkpoint. If it is true, we update best.ckpt, else latest.ckpt.
         """
-        model_path = os.path.join(self.model_dir,
-                                  "{}.ckpt".format(self.stats.steps))
+        model_path = os.path.join(self.model_dir, f"{self.stats.steps}.ckpt")
         logger.info("Saving new checkpoint: %s", model_path)
         model_state_dict = self.model.module.state_dict() \
             if isinstance(self.model, torch.nn.DataParallel) \
@@ -253,7 +253,7 @@ class TrainManager:
             self.train_iter.state_dict()
         }
         torch.save(state, model_path)
-        symlink_target = "{}.ckpt".format(self.stats.steps)
+        symlink_target = f"{self.stats.steps}.ckpt"
         if new_best:
             if self.ckpt_queue.maxlen is not None and \
                     len(self.ckpt_queue) == self.ckpt_queue.maxlen:
@@ -262,7 +262,7 @@ class TrainManager:
 
             self.ckpt_queue.append(model_path)
 
-            best_path = "{}/best.ckpt".format(self.model_dir)
+            best_path = os.path.join(self.model_dir, "best.ckpt")
             try:
                 # create/modify symbolic link for best checkpoint
                 symlink_update(symlink_target, best_path)
@@ -271,7 +271,7 @@ class TrainManager:
                 torch.save(state, best_path)
 
         if self.save_latest_checkpoint:
-            last_path = "{}/latest.ckpt".format(self.model_dir)
+            last_path = os.path.join(self.model_dir, "latest.ckpt")
             previous_path = latest_checkpoint_update(symlink_target, last_path)
             # If the last ckpt is in the ckpt_queue, we don't want to delete it.
             if self.ckpt_queue.maxlen is not None:
@@ -627,8 +627,8 @@ class TrainManager:
                                   targets=valid_hypotheses_raw,
                                   sources=[s for s in valid_data.src],
                                   indices=self.log_valid_sents,
-                                  output_prefix="{}/att.{}".format(
-                                      self.model_dir, self.stats.steps),
+                                  output_prefix=os.path.join(
+                                  self.model_dir, f"att.{self.stats.steps}"),
                                   tb_writer=self.tb_writer,
                                   steps=self.stats.steps)
 
@@ -720,8 +720,8 @@ class TrainManager:
 
         :param hypotheses: list of strings
         """
-        current_valid_output_file = "{}/{}.hyps".format(self.model_dir,
-                                                        self.stats.steps)
+        current_valid_output_file = os.path.join(self.model_dir,
+                                                 f"{self.stats.steps}.hyps")
         with open(current_valid_output_file, 'w') as opened_file:
             for hyp in hypotheses:
                 opened_file.write("{}\n".format(hyp))
@@ -789,7 +789,7 @@ def train(cfg_file: str) -> None:
     trainer = TrainManager(model=model, config=cfg)
 
     # store copy of original training config in model dir
-    shutil.copy2(cfg_file, model_dir + "/config.yaml")
+    shutil.copy2(cfg_file, os.path.join(model_dir, "config.yaml"))
 
     # log all entries of config
     log_cfg(cfg)
@@ -803,9 +803,9 @@ def train(cfg_file: str) -> None:
     logger.info(str(model))
 
     # store the vocabs
-    src_vocab_file = "{}/src_vocab.txt".format(cfg["training"]["model_dir"])
+    src_vocab_file = os.path.join(cfg["training"]["model_dir"], "src_vocab.txt")
+    trg_vocab_file = os.path.join(cfg["training"]["model_dir"], "trg_vocab.txt")
     src_vocab.to_file(src_vocab_file)
-    trg_vocab_file = "{}/trg_vocab.txt".format(cfg["training"]["model_dir"])
     trg_vocab.to_file(trg_vocab_file)
 
     # train the model
@@ -813,7 +813,7 @@ def train(cfg_file: str) -> None:
 
     # predict with the best model on validation and test
     # (if test data is available)
-    ckpt = "{}/{}.ckpt".format(model_dir, trainer.stats.best_ckpt_iter)
+    ckpt = os.path.join(model_dir, f"{trainer.stats.best_ckpt_iter}.ckpt")
     output_name = "{:08d}.hyps".format(trainer.stats.best_ckpt_iter)
     output_path = os.path.join(model_dir, output_name)
     datasets_to_test = {

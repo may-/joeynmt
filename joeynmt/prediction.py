@@ -334,6 +334,7 @@ def test(cfg_file,
     # build model and load parameters into it
     model = build_model(cfg["model"], src_vocab=src_vocab, trg_vocab=trg_vocab)
     model.load_state_dict(model_checkpoint["model_state"])
+    logger.info(f"load model_state from {ckpt}.")
 
     if use_cuda:
         model.to(device)
@@ -484,6 +485,7 @@ def translate(cfg_file: str,
     # build model and load parameters into it
     model = build_model(cfg["model"], src_vocab=src_vocab, trg_vocab=trg_vocab)
     model.load_state_dict(model_checkpoint["model_state"])
+    logger.info(f"load model_state from {ckpt}.")
 
     if use_cuda:
         model.to(device)

@@ -103,6 +103,8 @@ def validate_on_data(model: Model, data: Dataset,
         total_loss = 0
         total_ntokens = 0
         total_nseqs = 0
+        total_n_correct = 0
+
         for valid_batch in iter(valid_iter):
             # run as during training to get validation loss (e.g. xent)
 
@@ -112,12 +114,15 @@ def validate_on_data(model: Model, data: Dataset,
 
             # run as during training with teacher forcing
             if compute_loss and batch.trg is not None:
-                batch_loss, _, _, _ = model(return_type="loss", **vars(batch))
+                batch_loss, _, _, n_correct = model(
+                    return_type="loss", **vars(batch))
                 if n_gpu > 1:
                     batch_loss = batch_loss.mean() # average on multi-gpu
+                    n_correct = n_correct.mean()
                 total_loss += batch_loss
                 total_ntokens += batch.ntokens
                 total_nseqs += batch.nseqs
+                total_n_correct += n_correct
 
             # run as during inference to produce translations
             output, attention_scores = run_batch(
@@ -137,9 +142,12 @@ def validate_on_data(model: Model, data: Dataset,
             valid_loss = total_loss
             # exponent of token-level negative log prob
             valid_ppl = torch.exp(total_loss / total_ntokens)
+            # accuracy before decoding
+            valid_acc = total_n_correct / total_ntokens
         else:
             valid_loss = -1
             valid_ppl = -1
+            valid_acc = -1
 
         # decode back to symbols
         decoded_valid = model.trg_vocab.arrays_to_sentences(arrays=all_outputs,
@@ -186,9 +194,9 @@ def validate_on_data(model: Model, data: Dataset,
         else:
             current_valid_scores = None
 
-    return current_valid_scores, valid_loss, valid_ppl, valid_sources, \
-        valid_sources_raw, valid_references, valid_hypotheses, \
-        decoded_valid, valid_attention_scores
+    return current_valid_scores, valid_loss, valid_ppl, valid_acc, \
+           valid_sources, valid_sources_raw, valid_references, \
+           valid_hypotheses, decoded_valid, valid_attention_scores
 
 
 def parse_test_args(cfg, mode="test"):
@@ -342,7 +350,7 @@ def test(cfg_file,
         logger.info("Decoding on %s set (%s)...", data_set_name, dataset_file)
 
         #pylint: disable=unused-variable
-        scores, loss, ppl, sources, sources_raw, references, hypotheses, \
+        scores, loss, ppl, acc, sources, sources_raw, references, hypotheses, \
         hypotheses_raw, attention_scores = validate_on_data(
             model, data=data_set, batch_size=batch_size,
             batch_class=Batch, batch_type=batch_type, level=level,
@@ -426,7 +434,7 @@ def translate(cfg_file: str,
     def _translate_data(test_data):
         """ Translates given dataset, using parameters from outer scope. """
         # pylint: disable=unused-variable
-        scores, loss, ppl, sources, sources_raw, references, hypotheses, \
+        scores, loss, ppl, acc, sources, sources_raw, references, hypotheses, \
         hypotheses_raw, attention_scores = validate_on_data(
             model, data=test_data, batch_size=batch_size,
             batch_class=Batch, batch_type=batch_type, level=level,

@@ -5,6 +5,7 @@ Module to represents whole models
 from typing import Callable
 import logging
 
+import torch
 import torch.nn as nn
 from torch import Tensor
 import torch.nn.functional as F
@@ -90,9 +91,15 @@ class Model(nn.Module):
             # compute batch loss
             batch_loss = self.loss_function(log_probs, kwargs["trg"])
 
+            # count correct tokens before decoding (for accuracy)
+            trg_mask = kwargs["trg_mask"].squeeze(1)
+            assert kwargs["trg"].size() == trg_mask.size()
+            n_correct = torch.sum(log_probs.argmax(-1).masked_select(
+                trg_mask).eq(kwargs["trg"].masked_select(trg_mask)))
+
             # return batch loss
             #     = sum over all elements in batch that are not pad
-            return_tuple = (batch_loss, None, None, None)
+            return_tuple = (batch_loss, None, None, n_correct)
 
         elif return_type == "encode":
             encoder_output, encoder_hidden = self._encode(**kwargs)

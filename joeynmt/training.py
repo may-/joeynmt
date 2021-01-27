@@ -120,6 +120,8 @@ class TrainManager:
         # score, else we want to minimize it.
         if self.early_stopping_metric in ["ppl", "loss"]:
             self.minimize_metric = True
+        elif self.early_stopping_metric in ["acc"]:
+            self.minimize_metric = False
         elif self.early_stopping_metric == "eval_metric":
             if self.eval_metrics[0] in [
                     "bleu", "chrf", "token_accuracy", "sequence_accuracy"
@@ -131,7 +133,7 @@ class TrainManager:
         else:
             raise ConfigurationError(
                 "Invalid setting for 'early_stopping_metric', "
-                "valid options: 'loss', 'ppl', 'eval_metric'.")
+                "valid options: 'loss', 'ppl', 'acc', 'eval_metric'.")
 
         # eval options
         test_config = config["testing"]
@@ -232,7 +234,6 @@ class TrainManager:
         """
         Save the model's current parameters and the training state to a
         checkpoint.
-
         The training state contains the total number of training steps,
         the total number of training tokens,
         the best checkpoint score and iteration so far,
@@ -242,7 +243,6 @@ class TrainManager:
           new checkpoint. If it is true, we update best.ckpt, else latest.ckpt.
         """
         model_path = os.path.join(self.model_dir, f"{self.stats.steps}.ckpt")
-        logger.info(f"Saving new checkpoint: {model_path}")
         model_state_dict = self.model.module.state_dict() \
             if isinstance(self.model, torch.nn.DataParallel) \
             else self.model.state_dict()
@@ -432,6 +432,7 @@ class TrainManager:
             self.model.zero_grad()
             epoch_loss = 0
             batch_loss = 0
+            batch_acc = 0
 
             for i, batch in enumerate(iter(self.train_iter)):
                 # create a Batch object from torchtext batch
@@ -439,7 +440,9 @@ class TrainManager:
                                          use_cuda=self.use_cuda)
 
                 # get batch loss
-                batch_loss += self._train_step(batch)
+                loss, acc = self._train_step(batch)
+                batch_loss += loss
+                batch_acc += acc
 
                 # update!
                 if (i + 1) % self.batch_multiplier == 0:
@@ -473,21 +476,24 @@ class TrainManager:
                             self.optimizer.param_groups[0]["lr"], self.stats.steps)
                         self.tb_writer.add_scalar("train/train_batch_loss",
                                                   batch_loss, self.stats.steps)
+                        self.tb_writer.add_scalar("train/train_batch_acc",
+                                                  batch_acc, self.stats.steps)
                         elapsed = time.time() - start - total_valid_duration
                         elapsed_tokens = self.stats.total_tokens - start_tokens
                         logger.info(
                             "Epoch %3d, Step: %8d, Batch Loss: %12.6f, "
-                            "Tokens per Sec: %8.0f, Lr: %.6f", epoch_no + 1,
-                            self.stats.steps, batch_loss,
-                            elapsed_tokens / elapsed,
+                            "Batch Acc: %.6f, Tokens per Sec: %8.0f, Lr: %.6f",
+                            epoch_no + 1, self.stats.steps, batch_loss,
+                            batch_acc, elapsed_tokens / elapsed,
                             self.optimizer.param_groups[0]["lr"])
                         start = time.time()
                         total_valid_duration = 0
                         start_tokens = self.stats.total_tokens
 
                     # Only add complete loss of full mini-batch to epoch_loss
-                    epoch_loss += batch_loss  # accumulate epoch_loss
-                    batch_loss = 0  # rest batch_loss
+                    epoch_loss += batch_loss    # accumulate epoch_loss
+                    batch_loss = 0              # rest batch_loss
+                    batch_acc = 0               # rest batch_acc
 
                     # validate on the entire dev set
                     if self.stats.steps % self.validation_freq == 0:
@@ -512,9 +518,12 @@ class TrainManager:
                         epoch_loss)
         else:
             logger.info('Training ended after %3d epochs.', epoch_no + 1)
+        metric_name = self.eval_metrics[0] \
+            if self.early_stopping_metric == "eval_metric" \
+            else self.early_stopping_metric
         logger.info('Best validation result (greedy) at step %8d: %6.2f %s.',
                     self.stats.best_ckpt_iter, self.stats.best_ckpt_score,
-                    self.eval_metrics[0] if self.early_stopping_metric == "eval_metric" else self.early_stopping_metric)
+                    metric_name)
 
         self.tb_writer.close()  # close Tensorboard writer
 
@@ -529,11 +538,13 @@ class TrainManager:
         self.model.train()
 
         # get loss
-        batch_loss, _, _, _ = self.model(return_type="loss", **vars(batch))
+        batch_loss, _, _, correct_tokens = self.model(
+            return_type="loss", **vars(batch))
 
         # sum multi-gpu losses
         if self.n_gpu > 1:
             batch_loss = batch_loss.sum()
+            correct_tokens = correct_tokens.sum()
 
         # normalize batch loss
         if self.normalization == "batch":
@@ -550,6 +561,7 @@ class TrainManager:
 
         if self.n_gpu > 1:
             norm_batch_loss = norm_batch_loss / self.n_gpu
+            correct_tokens = correct_tokens / self.n_gpu
 
         if self.batch_multiplier > 1:
             norm_batch_loss = norm_batch_loss / self.batch_multiplier
@@ -564,12 +576,12 @@ class TrainManager:
         # increment token counter
         self.stats.total_tokens += batch.ntokens
 
-        return norm_batch_loss.item()
+        return norm_batch_loss.item(), (correct_tokens/batch.ntokens).item()
 
     def _validate(self, valid_data, epoch_no):
         valid_start_time = time.time()
 
-        valid_scores, valid_loss, valid_ppl, valid_sources, \
+        valid_scores, valid_loss, valid_ppl, valid_acc, valid_sources, \
         valid_sources_raw, valid_references, valid_hypotheses, \
         valid_hypotheses_raw, valid_attention_scores = \
             validate_on_data(
@@ -597,12 +609,16 @@ class TrainManager:
                 f"valid/valid_{eval_metric}", valid_scores[eval_metric], self.stats.steps)
         self.tb_writer.add_scalar(
             "valid/valid_ppl", valid_ppl, self.stats.steps)
+        self.tb_writer.add_scalar(
+            "valid/valid_acc", valid_acc, self.stats.steps)
 
         if self.early_stopping_metric == "loss":
             ckpt_score = valid_loss
+        elif self.early_stopping_metric == "acc":
+            ckpt_score = valid_acc
         elif self.early_stopping_metric in ["ppl", "perplexity"]:
             ckpt_score = valid_ppl
-        else:
+        else:   #if self.early_stopping_metric == "eval_metric"
             ckpt_score = valid_scores[self.eval_metrics[0]]
 
         if self.scheduler is not None \
@@ -624,6 +640,7 @@ class TrainManager:
         self._add_report(valid_scores=valid_scores,
                          valid_loss=valid_loss,
                          valid_ppl=valid_ppl,
+                         valid_acc=valid_acc,
                          eval_metrics=self.eval_metrics,
                          new_best=new_best)
 
@@ -641,8 +658,8 @@ class TrainManager:
         logger.info(
             'Validation result (greedy) at epoch %3d, '
             'step %8d: %s, loss: %8.4f, ppl: %8.4f, '
-            'duration: %.4fs', epoch_no + 1, self.stats.steps,
-            score_str, valid_loss, valid_ppl, valid_duration)
+            'acc: %.4f, duration: %.4fs', epoch_no + 1, self.stats.steps,
+            score_str, valid_loss, valid_ppl, valid_acc, valid_duration)
 
         # store validation set outputs
         self._store_outputs(valid_hypotheses)
@@ -664,6 +681,7 @@ class TrainManager:
                     valid_scores: float,
                     valid_ppl: float,
                     valid_loss: float,
+                    valid_acc: float,
                     eval_metrics: List[str],
                     new_best: bool = False) -> None:
         """
@@ -672,6 +690,7 @@ class TrainManager:
         :param valid_scores: (dict) validation evaluation scores [eval_metrics]
         :param valid_ppl: validation perplexity
         :param valid_loss: validation loss (sum over whole validation set)
+        :param valid_acc: validation token accuracy before decoding
         :param eval_metrics: evaluation metric, e.g. "bleu"
         :param new_best: whether this is a new best model
         """
@@ -685,14 +704,14 @@ class TrainManager:
             self.stats.is_min_lr = True
 
         with open(self.valid_report_file, 'a') as opened_file:
-            score_str = "\t"
+            score_str = ""
             for eval_metric in eval_metrics:
                 score_str += "{}: {:.5f}\t".format(eval_metric, valid_scores[eval_metric])
             opened_file.write(
-                "Steps: {}\tLoss: {:.5f}\tPPL: {:.5f}{}"
-                "LR: {:.8f}\t{}\n".format(
-                    self.stats.steps, valid_loss, valid_ppl, score_str,
-                    current_lr, "*" if new_best else ""))
+                "Steps: {}\tLoss: {:.5f}\tPPL: {:.5f}\tAcc: {:.5f}\t"
+                "{}LR: {:.8f}\t{}\n".format(
+                    self.stats.steps, valid_loss, valid_ppl, valid_acc,
+                    score_str, current_lr, "*" if new_best else ""))
 
     def _log_parameters_list(self) -> None:
         """

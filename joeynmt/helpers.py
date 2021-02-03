@@ -149,13 +149,16 @@ def log_data_info(train_data: Dataset, valid_data: Dataset, test_data: Dataset,
     :param trg_vocab:
     """
     logger = logging.getLogger(__name__)
-    logger.info("Data set sizes: \n\ttrain %d,\n\tvalid %d,\n\ttest %d",
-                len(train_data), len(valid_data),
-                len(test_data) if test_data is not None else 0)
+    logger.info(
+        "Data set sizes: \n\ttrain %10d,\n\t  dev %10d,\n\t test %10d",
+        len(train_data) if train_data is not None else 0,
+        len(valid_data) if valid_data is not None else 0,
+        len(test_data) if test_data is not None else 0)
 
-    logger.info("First training example:\n\t[SRC] %s\n\t[TRG] %s",
-                " ".join(vars(train_data[0])['src']),
-                " ".join(vars(train_data[0])['trg']))
+    if train_data:
+        logger.info("First training example:\n\t[SRC] %s\n\t[TRG] %s",
+                    " ".join(vars(train_data[0])['src']),
+                    " ".join(vars(train_data[0])['trg']))
 
     logger.info(
         "First 10 words (src): %s",

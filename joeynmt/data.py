@@ -14,6 +14,7 @@ from torchtext import data
 from torchtext.data import Dataset, Iterator, Field
 
 from joeynmt.constants import UNK_TOKEN, EOS_TOKEN, BOS_TOKEN, PAD_TOKEN
+from joeynmt.helpers import log_data_info
 from joeynmt.vocabulary import build_vocab, Vocabulary
 
 logger = logging.getLogger(__name__)
@@ -136,6 +137,7 @@ def load_data(data_cfg: dict, datasets: list = None)\
     src_field.vocab = src_vocab
     trg_field.vocab = trg_vocab
     logger.info("Data loaded.")
+    log_data_info(train_data, dev_data, test_data, src_vocab, trg_vocab)
     return train_data, dev_data, test_data, src_vocab, trg_vocab
 
 

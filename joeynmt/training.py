@@ -22,10 +22,9 @@ from torchtext.data import Dataset
 
 from joeynmt.model import build_model
 from joeynmt.batch import Batch
-from joeynmt.helpers import log_data_info, load_config, log_cfg, \
-    store_attention_plots, load_checkpoint, make_model_dir, \
-    make_logger, set_seed, symlink_update, delete_ckpt, \
-    latest_checkpoint_update, ConfigurationError
+from joeynmt.helpers import load_config, log_cfg, store_attention_plots, \
+    load_checkpoint, make_model_dir, make_logger, set_seed, symlink_update, \
+    delete_ckpt, latest_checkpoint_update, ConfigurationError
 from joeynmt.model import Model, _DataParallel
 from joeynmt.prediction import validate_on_data
 from joeynmt.loss import XentLoss
@@ -793,12 +792,6 @@ def train(cfg_file: str) -> None:
 
     # log all entries of config
     log_cfg(cfg)
-
-    log_data_info(train_data=train_data,
-                  valid_data=dev_data,
-                  test_data=test_data,
-                  src_vocab=src_vocab,
-                  trg_vocab=trg_vocab)
 
     logger.info(str(model))
 

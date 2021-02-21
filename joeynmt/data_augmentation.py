@@ -68,3 +68,35 @@ class SpecAugment:
                     f"time_mask_t={self.time_mask_t}",
                     f"time_mask_p={self.time_mask_p}"])
                 + ")")
+
+
+class AudioDictSampling(object):
+    def __init__(self, audio_dict_path: str, audio_dict_splits: str):
+        try:
+            import pandas as pd
+        except:
+            raise ImportError("Please install pandas: `pip install pandas`")
+        # audio dict dataframe
+        self.audio_dict_df = None
+
+    def __call__(self, spectrogram: np.ndarray, textgrids: List[List], positions: dict):
+        """
+        AudioDictSampling
+        :param spectrogram: (np.ndarray) spectrogram features, shape (num_frames, num_freq)
+        :param textgrids: (List[List])
+        :param positions: (dict) `{n: new_word` => word in n-th position will be replaced by new_word
+        :return: augmented_spectrogram
+        """
+        for pos, word_surface in positions.items():
+            pass
+        return spectrogram
+
+
+class MaskedLanguageModelAugment(object):
+    def __init__(self):
+
+        pass
+
+    def __call__(self, positions):
+        pass
+    

@@ -17,8 +17,7 @@ from torchtext.data import Dataset, Iterator, Field
 
 from joeynmt.constants import UNK_TOKEN, EOS_TOKEN, BOS_TOKEN, PAD_TOKEN
 from joeynmt.vocabulary import build_vocab, Vocabulary
-from joeynmt.helpers import log_data_info
-from joeynmt.helpers_for_audio import SpeechInstance, pad_features
+from joeynmt.helpers_for_audio import SpeechInstance, pad_features, get_textgrid
 
 
 logger = logging.getLogger(__name__)
@@ -87,6 +86,10 @@ def load_data(data_cfg: dict, datasets: list = None)\
             postprocessing=partial(pad_features, embed_size=num_freq),
             is_target=False)
 
+    textgrid = data_cfg.get("textgrid", False)
+    if textgrid:
+        textgrid_field = data.RawField(is_target=False)
+
     trg_field = data.Field(init_token=BOS_TOKEN, eos_token=EOS_TOKEN,
                            pad_token=PAD_TOKEN, tokenize=tok_fun,
                            unk_token=UNK_TOKEN,
@@ -103,12 +106,16 @@ def load_data(data_cfg: dict, datasets: list = None)\
                 filter_pred=lambda x: len(vars(x)['src']) <= max_sent_length
                                       and len(vars(x)['trg']) <= max_sent_length)
         elif task == "s2t":
+            fields = [('src', src_field), ('trg', trg_field)]
+            kwargs = {}
+            if textgrid:
+                kwargs['frameshift'] = data_cfg.get("frame_shift", 100)
+                fields.append(('textgrid', textgrid_field))
             train_data = SpeechDataset(
-                root_path=root_path, tsv_file=train_path,
-                fields=[('src', src_field), ('trg', trg_field)],
+                root_path=root_path, tsv_file=train_path, fields=fields,
                 filter_pred=lambda x: len(vars(x)['src']) <= max_feat_length
                                       and len(vars(x)['trg']) <= max_sent_length,
-                is_train=True)
+                is_train=True, **kwargs)
 
         random_train_subset = data_cfg.get("random_train_subset", -1)
         if random_train_subset > -1:
@@ -297,6 +304,10 @@ class SpeechDataset(TranslationDataset):
         assert isinstance(fields, list) and isinstance(fields[0], tuple)
         root_path = os.path.expanduser(root_path)
         headers = [name for name, _ in fields]
+        if "textgrid" in headers:
+            frame_shift = kwargs.get("frame_shift", 100)
+        if "frame_shift" in kwargs:
+            del kwargs["frame_shift"]
         assert 'src' in headers # mono dataset without 'trg' also covered by this class
 
         ##### expected dir structure #####
@@ -351,6 +362,10 @@ class SpeechDataset(TranslationDataset):
                                                 int(dic['n_frames']), str(_id))
                 if 'trg' in headers:
                     example['trg'] = dic['trg']
+                if 'textgrid' in headers and 'trg_text' in dic.keys():
+                    textgrid_path = os.path.join(root_path, dic['textgrid'])
+                    example['textgrid'] = get_textgrid(textgrid_path, dic['trg_text'].lower(),
+                                                       frame_shift=frame_shift)
                 examples.append(data.Example.fromlist([example[h] for h in headers], fields))
 
         assert len(examples) > 0

@@ -3,6 +3,7 @@
 """
 Implementation of a mini-batch.
 """
+from typing import List
 import numpy as np
 
 import torch
@@ -142,10 +143,11 @@ class SpeechBatch(Batch):
     def _read(self, torch_batch):
         (src, src_length) = torch_batch.src
         (trg, trg_length) = torch_batch.trg if hasattr(torch_batch, "trg") else (None, None)
+        textgrid = torch_batch.textgrid if hasattr(torch_batch, "textgrid") else None
 
         if self.is_train:
             src, src_length, trg, trg_length = self._augment(
-                src, src_length, trg, trg_length)
+                src, src_length, trg, trg_length, textgrid)
 
         return src, src_length, trg, trg_length
 
@@ -153,7 +155,8 @@ class SpeechBatch(Batch):
                  src_input: np.ndarray,
                  src_length: np.ndarray,
                  trg_input: torch.Tensor,
-                 trg_length: torch.Tensor):
+                 trg_length: torch.Tensor,
+                 textgrid: List[List[List]] = None):
         """
         Augment Data
 
@@ -161,6 +164,7 @@ class SpeechBatch(Batch):
         :param src_length: np.ndarray, shape (batch_size)
         :param trg_input: torch.Tensor
         :param trg_length: torch.Tensor
+        :param textgrid: List[List[List]]
         :return: src_input_aug, src_length_aug, trg_input_aug, trg_length_aug
         """
         batch_size = len(src_input)
@@ -169,6 +173,8 @@ class SpeechBatch(Batch):
 
             #trg = trg_input[i]
             #t_l = trg_length[i]
+            #if textgrid:
+            #    tg = textgrid[i]
 
             s_l = src_length[i]
             if self.specaugment:

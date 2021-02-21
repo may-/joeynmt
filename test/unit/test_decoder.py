@@ -180,14 +180,17 @@ class TestRecurrentDecoder(TensorTestCase):
                                    num_layers=self.num_layers,
                                    init_hidden="zero",
                                    input_feeding=False)
+        encoder_out_size = self.encoders[0].output_size
         encoder_states = torch.rand(size=(batch_size, time_dim,
-                                          self.encoders[0].output_size))
+                                          encoder_out_size))
         trg_inputs = torch.ones(size=(batch_size, time_dim, self.emb_size))
         # no padding, no mask
         #x_length = torch.Tensor([time_dim]*batch_size).int()
         mask = torch.ones(size=(batch_size, 1, time_dim)).byte()
-        output, hidden, att_probs, att_vectors = decoder(
-            trg_inputs, encoder_hidden=encoder_states[:, -1, :],
+        encoder_hidden = encoder_states[:, -1, :].squeeze(1)
+        assert encoder_hidden.size() == torch.Size([batch_size, encoder_out_size])
+        output, hidden, att_probs, att_vectors, _ = decoder(
+            trg_inputs, encoder_hidden=encoder_hidden,
             encoder_output=encoder_states, src_mask=mask, unroll_steps=time_dim,
             hidden=None, prev_att_vector=None)
         self.assertEqual(output.shape, torch.Size(

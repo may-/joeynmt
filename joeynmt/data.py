@@ -4,8 +4,10 @@ Data module
 """
 import sys
 import random
+import csv
 import os
 import os.path
+from functools import partial
 from typing import Optional
 import logging
 
@@ -15,6 +17,9 @@ from torchtext.data import Dataset, Iterator, Field
 
 from joeynmt.constants import UNK_TOKEN, EOS_TOKEN, BOS_TOKEN, PAD_TOKEN
 from joeynmt.vocabulary import build_vocab, Vocabulary
+from joeynmt.helpers import log_data_info
+from joeynmt.helpers_for_audio import SpeechInstance, pad_features
+
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +39,7 @@ def load_data(data_cfg: dict, datasets: list = None)\
     from the training set instead of the full training set.
 
     :param data_cfg: configuration dictionary for data
-        ("data" part of configuation file)
+        ("data" part of configuration file)
     :param datasets: list of dataset names to load
     :return:
         - train_data: training dataset
@@ -46,9 +51,15 @@ def load_data(data_cfg: dict, datasets: list = None)\
     if datasets is None:
         datasets = ["train", "dev", "test"]
 
+    task = data_cfg.get("task", "MT")
+    assert task in {"MT", "s2t"}
+
     # load data from files
-    src_lang = data_cfg["src"]
-    trg_lang = data_cfg["trg"]
+    if task == "MT":
+        src_lang = data_cfg["src"]
+        trg_lang = data_cfg["trg"]
+    elif task == "s2t":
+        root_path = data_cfg["root_path"]
     train_path = data_cfg.get("train", None)
     dev_path = data_cfg.get("dev", None)
     test_path = data_cfg.get("test", None)
@@ -59,14 +70,22 @@ def load_data(data_cfg: dict, datasets: list = None)\
     level = data_cfg["level"]
     lowercase = data_cfg["lowercase"]
     max_sent_length = data_cfg["max_sent_length"]
+    if task == "s2t":
+        max_feat_length = data_cfg.get("max_feat_length", 3000)
+        num_freq = data_cfg.get("num_freq", 80)
 
     tok_fun = lambda s: list(s) if level == "char" else s.split()
 
-    src_field = data.Field(init_token=None, eos_token=EOS_TOKEN,
-                           pad_token=PAD_TOKEN, tokenize=tok_fun,
-                           batch_first=True, lower=lowercase,
-                           unk_token=UNK_TOKEN,
-                           include_lengths=True)
+    if task == "MT":
+        src_field = data.Field(init_token=None, eos_token=EOS_TOKEN,
+                               pad_token=PAD_TOKEN, tokenize=tok_fun,
+                               batch_first=True, lower=lowercase,
+                               unk_token=UNK_TOKEN,
+                               include_lengths=True)
+    elif task == "s2t":
+        src_field = data.RawField(
+            postprocessing=partial(pad_features, embed_size=num_freq),
+            is_target=False)
 
     trg_field = data.Field(init_token=BOS_TOKEN, eos_token=EOS_TOKEN,
                            pad_token=PAD_TOKEN, tokenize=tok_fun,
@@ -77,14 +96,19 @@ def load_data(data_cfg: dict, datasets: list = None)\
     train_data = None
     if "train" in datasets and train_path is not None:
         logger.info("Loading training data...")
-        train_data = TranslationDataset(path=train_path,
-                                        exts=("." + src_lang, "." + trg_lang),
-                                        fields=(src_field, trg_field),
-                                        filter_pred=
-                                        lambda x: len(vars(x)['src'])
-                                        <= max_sent_length
-                                        and len(vars(x)['trg'])
-                                        <= max_sent_length)
+        if task == "MT":
+            train_data = TranslationDataset(
+                path=train_path, exts=("." + src_lang, "." + trg_lang),
+                fields=(src_field, trg_field),
+                filter_pred=lambda x: len(vars(x)['src']) <= max_sent_length
+                                      and len(vars(x)['trg']) <= max_sent_length)
+        elif task == "s2t":
+            train_data = SpeechDataset(
+                root_path=root_path, tsv_file=train_path,
+                fields=[('src', src_field), ('trg', trg_field)],
+                filter_pred=lambda x: len(vars(x)['src']) <= max_feat_length
+                                      and len(vars(x)['trg']) <= max_sent_length,
+                is_train=True)
 
         random_train_subset = data_cfg.get("random_train_subset", -1)
         if random_train_subset > -1:
@@ -103,13 +127,16 @@ def load_data(data_cfg: dict, datasets: list = None)\
     src_vocab_file = data_cfg.get("src_vocab", None)
     trg_vocab_file = data_cfg.get("trg_vocab", None)
 
-    assert (train_data is not None) or (src_vocab_file is not None)
+    if task == "MT":
+        assert (train_data is not None) or (src_vocab_file is not None)
     assert (train_data is not None) or (trg_vocab_file is not None)
 
     logger.info("Building vocabulary...")
-    src_vocab = build_vocab(field="src", min_freq=src_min_freq,
-                            max_size=src_max_size,
-                            dataset=train_data, vocab_file=src_vocab_file)
+    src_vocab = None
+    if task == "MT":
+        src_vocab = build_vocab(field="src", min_freq=src_min_freq,
+                                max_size=src_max_size,
+                                dataset=train_data, vocab_file=src_vocab_file)
     trg_vocab = build_vocab(field="trg", min_freq=trg_min_freq,
                             max_size=trg_max_size,
                             dataset=train_data, vocab_file=trg_vocab_file)
@@ -117,25 +144,42 @@ def load_data(data_cfg: dict, datasets: list = None)\
     dev_data = None
     if "dev" in datasets and dev_path is not None:
         logger.info("Loading dev data...")
-        dev_data = TranslationDataset(path=dev_path,
-                                      exts=("." + src_lang, "." + trg_lang),
-                                      fields=(src_field, trg_field))
+        if task == "MT":
+            dev_data = TranslationDataset(path=dev_path,
+                                          exts=("." + src_lang, "." + trg_lang),
+                                          fields=(src_field, trg_field))
+        elif task == "s2t":
+            dev_data = SpeechDataset(
+                root_path=root_path, tsv_file=dev_path,
+                fields=[('src', src_field), ('trg', trg_field)], is_train=False)
 
     test_data = None
     if "test" in datasets and test_path is not None:
         logger.info("Loading test data...")
-        # check if target exists
-        if os.path.isfile(test_path + "." + trg_lang):
-            test_data = TranslationDataset(
-                path=test_path, exts=("." + src_lang, "." + trg_lang),
-                fields=(src_field, trg_field))
-        else:
-            # no target is given -> create dataset from src only
-            test_data = MonoDataset(path=test_path, ext="." + src_lang,
-                                    field=src_field)
-    src_field.vocab = src_vocab
+        if task == "MT":
+            # check if target exists
+            if os.path.isfile(test_path + "." + trg_lang):
+                test_data = TranslationDataset(
+                    path=test_path, exts=("." + src_lang, "." + trg_lang),
+                    fields=(src_field, trg_field))
+            else:
+                # no target is given -> create dataset from src only
+                test_data = MonoDataset(path=test_path, ext="." + src_lang,
+                                        field=src_field)
+        elif task == "s2t":
+            test_data = SpeechDataset(
+                root_path=root_path, tsv_file=test_path,
+                fields=[('src', src_field), ('trg', trg_field)], is_train=False)
+
+    if task == "MT":
+        src_field.vocab = src_vocab
     trg_field.vocab = trg_vocab
     logger.info("Data loaded.")
+
+    # log data info
+    log_data_info(train_data=train_data, valid_data=dev_data,
+                  test_data=test_data, src_vocab=src_vocab, trg_vocab=trg_vocab)
+
     return train_data, dev_data, test_data, src_vocab, trg_vocab
 
 
@@ -232,3 +276,84 @@ class MonoDataset(Dataset):
         src_file.close()
 
         super().__init__(examples, fields, **kwargs)
+
+
+class SpeechDataset(TranslationDataset):
+    """Defines a dataset for audio processing."""
+
+    @staticmethod
+    def sort_key(ex):
+        return len(ex.src)
+
+    def __init__(self, root_path, tsv_file, fields, is_train, **kwargs):
+        """Create a SpeechDataset given paths and fields.
+
+        :param root_path: root path for both tsv and zip file.
+        :param tsv_file: tsv file name.
+        :param fields: A tuple containing the fields that will be used for data
+                in each language.
+        :param is_train: bool
+        """
+        assert isinstance(fields, list) and isinstance(fields[0], tuple)
+        root_path = os.path.expanduser(root_path)
+        headers = [name for name, _ in fields]
+        assert 'src' in headers # mono dataset without 'trg' also covered by this class
+
+        ##### expected dir structure #####
+        # path/to/project/root
+        # ├── train.tsv             # tsv files
+        # ├── dev.tsv
+        # ├── test.tsv
+        # ├── fbank80.zip           # ex1) compressed: zip file with audio features (byte)
+        # └── fbank80               # ex2) uncompressed: directory which contains
+        #   ├── 116-288045-0.npy    #   audio features (np.ndarray, shape: (num_frames, num_freq))
+        #   ├── 116-288045-1.npy
+        #   └── 116-288045-2.npy
+        #
+        ##### tsv format (first line => headers) #####
+        # - `id [TAB] src [TAB] n_frames [TAB] trg` (src + trg, for training)
+        # - `id [TAB] src [TAB] n_frames`           (src only, for inference)
+        #   *we need information about the number of time frames (seq_len),
+        #   because we only store the path strings in working memory of the data loader,
+        #   and construct numpy array everytime a batch object is instantiated.
+        #
+        ##### ex1) audio features saved in *.zip #####
+        # id	src	n_frames	trg
+        # 116-288045-0	fbank80.zip:12526644911:340288	1063	▁as ▁i ▁approach ed ▁the ▁city ▁i ▁hear d ▁bell s ▁ring ing
+        # 116-288045-1	fbank80.zip:59760130943:275968	862 ▁look ing ▁a bout ▁me ▁i ▁saw ▁a ▁gentleman ▁in ▁a ▁neat ▁black ▁dress
+        # 116-288045-2	fbank80.zip:25990692418:307648	961	▁he ▁must ▁have ▁realize d ▁i ▁was ▁a ▁stranger
+        #
+        ##### ex2) audio features saved in *.npy #####
+        # id    src n_frames    trg
+        # 116-288045-0	fbank80/116-288045-0.npy	1063	▁as ▁i ▁approach ed ▁the ▁city ▁i ▁hear d ▁bell s ▁ring ing
+        # 116-288045-1	fbank80/116-288045-1.npy	862 ▁look ing ▁a bout ▁me ▁i ▁saw ▁a ▁gentleman ▁in ▁a ▁neat ▁black ▁dress
+        # 116-288045-2	fbank80/116-288045-2.npy	961	▁he ▁must ▁have ▁realize d ▁i ▁was ▁a ▁stranger
+        #
+        #########################################
+        tsv_path = os.path.join(root_path, f"{tsv_file}.tsv")
+        if not os.path.isfile(tsv_path):
+            raise FileNotFoundError(f"Dataset not found: {tsv_path}")
+        examples = []
+        with open(tsv_path) as f:
+            reader = csv.DictReader(
+                f,
+                delimiter="\t",
+                quotechar=None,
+                doublequote=False,
+                lineterminator="\n",
+                quoting=csv.QUOTE_NONE,
+            )
+            for i, dic in enumerate(reader):
+                assert 'src' in dic.keys() and 'n_frames' in dic.keys()
+                example = dict()
+                _id = dic['id'] if 'id' in dic.keys() else i
+                example['src'] = SpeechInstance(os.path.join(root_path, dic['src']),
+                                                int(dic['n_frames']), str(_id))
+                if 'trg' in headers:
+                    example['trg'] = dic['trg']
+                examples.append(data.Example.fromlist([example[h] for h in headers], fields))
+
+        assert len(examples) > 0
+
+        self.is_train = is_train
+        super(TranslationDataset, self).__init__(examples, fields, **kwargs)

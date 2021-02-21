@@ -18,6 +18,7 @@ import pkg_resources
 import torch
 from torch import nn, Tensor
 from torch.utils.tensorboard import SummaryWriter
+from torch.nn.functional import pad as _pad
 
 from torchtext.data import Dataset
 import yaml
@@ -156,18 +157,16 @@ def log_data_info(train_data: Dataset, valid_data: Dataset, test_data: Dataset,
         len(test_data) if test_data is not None else 0)
 
     if train_data:
-        logger.info("First training example:\n\t[SRC] %s\n\t[TRG] %s",
-                    " ".join(vars(train_data[0])['src']),
-                    " ".join(vars(train_data[0])['trg']))
-
-    logger.info(
-        "First 10 words (src): %s",
-        " ".join('(%d) %s' % (i, t) for i, t in enumerate(src_vocab.itos[:10])))
-    logger.info(
-        "First 10 words (trg): %s",
-        " ".join('(%d) %s' % (i, t) for i, t in enumerate(trg_vocab.itos[:10])))
-
-    logger.info("Number of Src words (types): %d", len(src_vocab))
+        src_sentence = "\n\t[SRC] " + " ".join(vars(train_data[0])['src']) if src_vocab else ""
+        logger.info("First training example:%s\n\t[TRG] %s",
+                    src_sentence, " ".join(vars(train_data[0])['trg']))
+    if src_vocab:
+        logger.info("First 10 words (src): %s", " ".join(
+            '(%d) %s' % (i, t) for i, t in enumerate(src_vocab.itos[:10])))
+    logger.info("First 10 words (trg): %s", " ".join(
+        '(%d) %s' % (i, t) for i, t in enumerate(trg_vocab.itos[:10])))
+    if src_vocab:
+        logger.info("Number of Src words (types): %d", len(src_vocab))
     logger.info("Number of Trg words (types): %d", len(trg_vocab))
 
 
@@ -375,3 +374,24 @@ def latest_checkpoint_update(target: pathlib.Path,
         return current_last
     link.symlink_to(target)
     return None
+
+
+def lengths_to_padding_mask(lens: torch.Tensor) -> torch.BoolTensor:
+    bsz, max_lens = lens.size(0), torch.max(lens).item()
+    mask = torch.arange(max_lens).to(lens.device).view(1, max_lens)
+    mask = mask.expand(bsz, -1) >= lens.view(bsz, 1).expand(-1, max_lens)
+    return ~mask
+
+
+def pad(x, max_len, pad_index, dim=1):
+    if dim == 1:
+        batch_size, seq_len, _ = x.size()
+        offset = max_len - seq_len
+        new_x = _pad(x, (0, 0, 0, offset, 0, 0), "constant", pad_index) if x.size(1) < max_len else x
+    elif dim == -1:
+        batch_size, _, seq_len = x.size()
+        offset = max_len - seq_len
+        new_x = _pad(x, (0, offset), "constant", pad_index) if x.size(1) < max_len else x
+    assert new_x.size(dim) == max_len, (x.size(), offset, new_x.size(), max_len)
+    return new_x
+

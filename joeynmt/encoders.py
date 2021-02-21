@@ -1,11 +1,13 @@
 # coding: utf-8
 
+from typing import List
+
 import torch
 import torch.nn as nn
 from torch import Tensor
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
-from joeynmt.helpers import freeze_params
+from joeynmt.helpers import freeze_params, lengths_to_padding_mask, pad
 from joeynmt.transformer_layers import \
     TransformerEncoderLayer, PositionalEncoding
 
@@ -23,7 +25,6 @@ class Encoder(nn.Module):
         :return:
         """
         return self._output_size
-
 
 class RecurrentEncoder(Encoder):
     """Encodes a sequence of word embeddings"""
@@ -52,6 +53,13 @@ class RecurrentEncoder(Encoder):
         :param kwargs:
         """
         super().__init__()
+
+        # conv1d subsampling for audio inputs
+        #self.subsample = kwargs.get("subsample", False)
+        #if self.subsample:
+        #    self.subsampler = Conv1dSubsampler(
+        #        kwargs["in_channels"], kwargs["conv_channels"], hidden_size,
+        #        [int(k) for k in kwargs["conv_kernel_sizes"].split(",")])
 
         self.emb_dropout = torch.nn.Dropout(p=emb_dropout, inplace=False)
         self.type = rnn_type
@@ -82,12 +90,12 @@ class RecurrentEncoder(Encoder):
         """
         assert embed_src.shape[0] == src_length.shape[0]
         assert embed_src.shape[2] == self.emb_size
-       # assert mask.shape == embed_src.shape
+        # assert mask.shape == embed_src.shape
         assert len(src_length.shape) == 1
 
     #pylint: disable=arguments-differ
     def forward(self, embed_src: Tensor, src_length: Tensor, mask: Tensor,
-                **kwargs) -> (Tensor, Tensor):
+                **kwargs) -> (Tensor, Tensor, Tensor):
         """
         Applies a bidirectional RNN to sequence of embeddings x.
         The input mini-batch x needs to be sorted by src length.
@@ -104,7 +112,16 @@ class RecurrentEncoder(Encoder):
                 shape (batch_size, max_length, directions*hidden),
             - hidden_concat: last hidden state with
                 shape (batch_size, directions*hidden)
+            - mask: indicates padding areas (after being subsampled)
+                shape (batch_size, 1, src_len)
         """
+        #TODO: enable subsampling
+        #if self.subsample:
+        #    embed_src, src_length = self.subsampler(embed_src, src_length)
+        #
+        #if mask is None:
+        #    mask = lengths_to_padding_mask(src_length).unsqueeze(1)
+
         self._check_shapes_input_forward(embed_src=embed_src,
                                          src_length=src_length,
                                          mask=mask)
@@ -142,7 +159,10 @@ class RecurrentEncoder(Encoder):
         hidden_concat = torch.cat(
             [fwd_hidden_last, bwd_hidden_last], dim=2).squeeze(0)
         # final: batch x directions*hidden
-        return output, hidden_concat
+
+        #TODO: re-pad sequences (when subsampling)?
+        assert hidden_concat.size(0) == output.size(0), (hidden_concat.size(), output.size())
+        return output, hidden_concat, mask
 
     def __repr__(self):
         return "%s(%r)" % (self.__class__.__name__, self.rnn)
@@ -177,6 +197,13 @@ class TransformerEncoder(Encoder):
         """
         super().__init__()
 
+        # conv1d subsampling for audio inputs
+        self.subsample = kwargs.get("subsample", False)
+        if self.subsample:
+            self.subsampler = Conv1dSubsampler(
+                kwargs["in_channels"], kwargs["conv_channels"], hidden_size,
+                [int(k) for k in kwargs["conv_kernel_sizes"].split(",")])
+
         # build all (num_layers) layers
         self.layers = nn.ModuleList([
             TransformerEncoderLayer(size=hidden_size, ff_size=ff_size,
@@ -192,11 +219,13 @@ class TransformerEncoder(Encoder):
         if freeze:
             freeze_params(self)
 
+        self.pad_index = 0.0 #kwargs.get("pad_index", 0.0)
+
     #pylint: disable=arguments-differ
     def forward(self,
                 embed_src: Tensor,
                 src_length: Tensor,
-                mask: Tensor, **kwargs) -> (Tensor, Tensor):
+                mask: Tensor = None, **kwargs) -> (Tensor, Tensor, Tensor):
         """
         Pass the input (and mask) through each layer in turn.
         Applies a Transformer encoder to sequence of embeddings x.
@@ -214,15 +243,90 @@ class TransformerEncoder(Encoder):
                 shape (batch_size, max_length, directions*hidden),
             - hidden_concat: last hidden state with
                 shape (batch_size, directions*hidden)
+            - mask: indicates padding areas (after being subsampled)
+                shape (batch_size, 1, src_len)
         """
+        if self.subsample:
+            embed_src, src_length = self.subsampler(embed_src, src_length)
+
+        if mask is None:
+            mask = lengths_to_padding_mask(src_length).unsqueeze(1)
+
         x = self.pe(embed_src)  # add position encoding to word embeddings
         x = self.emb_dropout(x)
 
         for layer in self.layers:
             x = layer(x, mask)
-        return self.layer_norm(x), None
+
+        x = self.layer_norm(x)
+
+        if kwargs.get('pad', False) and "src_max_len" in kwargs.keys() and self.subsample:
+            x = pad(x, kwargs["src_max_len"], pad_index=self.pad_index, dim=1)
+            mask = pad(mask, kwargs["src_max_len"], pad_index=self.pad_index, dim=-1)
+        assert src_length.size() == (x.size(0),), (src_length.size(), x.size())
+        return x, None, mask
+
 
     def __repr__(self):
-        return "%s(num_layers=%r, num_heads=%r)" % (
+        return "%s(num_layers=%r, num_heads=%r, subsample=%r)" % (
             self.__class__.__name__, len(self.layers),
-            self.layers[0].src_src_att.num_heads)
+            self.layers[0].src_src_att.num_heads, self.subsample)
+
+# from fairseq
+class Conv1dSubsampler(nn.Module):
+    """Convolutional subsampler: a stack of 1D convolution (along temporal
+    dimension) followed by non-linear activation via gated linear units
+    (https://arxiv.org/abs/1911.08460)
+
+    :param in_channels: (int) the number of input channels (embed_size = num_freq)
+    :param mid_channels: (int) the number of intermediate channels
+    :param out_channels: (int) the number of output channels (hidden_size)
+    :param kernel_sizes: (List[int]) the kernel size for each convolutional layer
+    """
+
+    def __init__(
+            self,
+            in_channels: int,
+            mid_channels: int,
+            out_channels: int = None,
+            kernel_sizes: List[int] = (3, 3),
+    ):
+        super(Conv1dSubsampler, self).__init__()
+
+        self.kernel_sizes = kernel_sizes
+        self.n_layers = len(kernel_sizes)
+        self.conv_layers = nn.ModuleList(
+            nn.Conv1d(
+                in_channels if i == 0 else mid_channels // 2,
+                mid_channels if i < self.n_layers - 1 else out_channels * 2,
+                k,
+                stride=2,
+                padding=k // 2,
+            )
+            for i, k in enumerate(kernel_sizes)
+        )
+
+    def get_out_seq_lens_tensor(self, in_seq_lens_tensor):
+        out = in_seq_lens_tensor.clone()
+        for k in self.kernel_sizes:
+            out = ((out.float()+2*(k//2)-(k-1)-1)/2+1).floor().long()
+        return out
+
+    def forward(self, src_tokens, src_lengths):
+        # reshape after DataParallel batch split
+        max_len = torch.max(src_lengths).item()
+        if src_tokens.size(1) != max_len:
+            src_tokens = src_tokens[:, :max_len, :]
+        assert src_tokens.size(1) == max_len, (src_tokens.size(), max_len, src_lengths)
+
+        bsz, in_seq_len, _ = src_tokens.size()  # -> B x T x (C x D)
+        x = src_tokens.transpose(1, 2).contiguous() # -> B x (C x D) x T
+        for conv in self.conv_layers:
+            x = conv(x)
+            x = nn.functional.glu(x, dim=1)
+        _, _, out_seq_len = x.size()
+        x = x.transpose(1, 2).contiguous()  # -> B x T x (C x D)
+        out_seq_lens = self.get_out_seq_lens_tensor(src_lengths)
+
+        assert x.size(1) == torch.max(out_seq_lens).item(), (x.size(), out_seq_lens)
+        return x, out_seq_lens

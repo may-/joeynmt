@@ -40,7 +40,7 @@ class TestTransformerEncoder(TensorTestCase):
         x_length = torch.Tensor([time_dim] * batch_size).int()
         mask = torch.ones([batch_size, 1, time_dim]) == 1
 
-        output, hidden = encoder(x, x_length, mask)
+        output, hidden, src_mask = encoder(x, x_length, mask)
 
         self.assertEqual(output.shape, torch.Size(
             [batch_size, time_dim, self.hidden_size]))
@@ -73,3 +73,49 @@ class TestTransformerEncoder(TensorTestCase):
                -4.9189e-01, 2.4027e-02]]]
         )
         self.assertTensorAlmostEqual(output_target, output)
+        self.assertTensorEqual(mask, src_mask)
+
+    def test_transformer_encoder_subsample(self):
+        batch_size = 2
+        time_dim = 4
+        subsample = True
+        conv_kernel_sizes="2,2"
+        torch.manual_seed(self.seed)
+
+        encoder = TransformerEncoder(
+            hidden_size=self.hidden_size, ff_size=self.ff_size,
+            num_layers=self.num_layers, num_heads=self.num_heads,
+            dropout=self.dropout, emb_dropout=self.dropout,
+            subsample=subsample, conv_kernel_sizes=conv_kernel_sizes,
+            conv_channels=self.hidden_size, in_channels=self.emb_size)
+
+        for p in encoder.parameters():
+            torch.nn.init.uniform_(p, -0.5, 0.5)
+
+        x = torch.rand(size=(batch_size, time_dim, self.emb_size))
+
+        # no padding, no mask
+        x_length = torch.Tensor([time_dim] * batch_size).int()
+        mask = None #torch.ones([batch_size, 1, time_dim]) == 1
+
+        output, hidden, src_mask = encoder(x, x_length, mask)
+
+        time_dim_subsampled = 2
+        self.assertEqual(output.shape, torch.Size(
+            [batch_size, time_dim_subsampled, self.hidden_size]))
+        self.assertEqual(hidden, None)
+
+        output_target = torch.Tensor(
+            [[[ 0.1556,  0.4113,  0.0754,  0.4091,  0.1101,  0.6424,  0.1251,
+                -0.5199, -0.3375, -0.0796,  0.3634,  0.1293],
+              [-0.0261,  0.4085,  0.0448,  0.4157,  0.1694,  0.6156,  0.1011,
+               -0.5124, -0.2934, -0.0518,  0.3037,  0.2096]],
+             [[ 0.1483,  0.4108,  0.0807,  0.4162,  0.1084,  0.6397,  0.1306,
+                -0.4989, -0.3754, -0.0780,  0.3834,  0.1232],
+              [-0.0529,  0.4087,  0.0472,  0.4163,  0.1831,  0.6393,  0.1072,
+               -0.4936, -0.3461, -0.0543,  0.3205,  0.1759]]]
+        )
+
+        mask_target = torch.ones([batch_size, 1, time_dim_subsampled]) == 1
+        self.assertTensorAlmostEqual(output_target, output)
+        self.assertTensorEqual(mask_target, src_mask)

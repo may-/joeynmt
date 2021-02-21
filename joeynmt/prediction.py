@@ -19,10 +19,11 @@ from joeynmt.metrics import bleu, chrf, token_accuracy, sequence_accuracy, \
     wer, EvaluationTokenizer
 from joeynmt.model import build_model, Model, _DataParallel
 from joeynmt.search import run_batch
-from joeynmt.batch import Batch
+from joeynmt.batch import Batch, SpeechBatch
 from joeynmt.data import load_data, make_data_iter, MonoDataset
 from joeynmt.constants import UNK_TOKEN, PAD_TOKEN, EOS_TOKEN
 from joeynmt.vocabulary import Vocabulary
+from joeynmt.loss import XentLoss, XentCTCLoss
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,7 @@ def validate_on_data(model: Model, data: Dataset,
                      batch_size: int,
                      use_cuda: bool, max_output_length: int,
                      level: str, eval_metrics: Optional[List[str]],
-                     n_gpu: int,
+                     n_gpu: int, task: str,
                      batch_class: Batch = Batch,
                      compute_loss: bool = False,
                      beam_size: int = 1, beam_alpha: int = -1,
@@ -95,7 +96,7 @@ def validate_on_data(model: Model, data: Dataset,
         dataset=data, batch_size=batch_size, batch_type=batch_type,
         shuffle=False, train=False)
     valid_sources_raw = data.src
-    pad_index = model.src_vocab.stoi[PAD_TOKEN]
+    pad_index = model.trg_vocab.stoi[PAD_TOKEN]
     # disable dropout
     model.eval()
     # don't track gradients during validation
@@ -110,17 +111,19 @@ def validate_on_data(model: Model, data: Dataset,
         for valid_batch in iter(valid_iter):
             # run as during training to get validation loss (e.g. xent)
 
-            batch = batch_class(valid_batch, pad_index, use_cuda=use_cuda)
+            kwargs = {"is_train": False} if task == "s2t" else {}
+            batch = batch_class(valid_batch, pad_index, use_cuda=use_cuda,
+                                **kwargs)
             # sort batch now by src length and keep track of order
             sort_reverse_index = batch.sort_by_src_length()
 
             # run as during training with teacher forcing
             if compute_loss and batch.trg is not None:
-                batch_loss, _, _, n_correct = model(
+                batch_loss, nll_loss, ctc_loss, n_correct = model(
                     return_type="loss", **vars(batch))
                 if n_gpu > 1:
-                    batch_loss = batch_loss.mean() # average on multi-gpu
-                    n_correct = n_correct.mean()
+                    batch_loss = batch_loss.sum() # sum over multi-gpu
+                    n_correct = n_correct.sum()
                 total_loss += batch_loss
                 total_ntokens += batch.ntokens
                 total_nseqs += batch.nseqs
@@ -140,12 +143,15 @@ def validate_on_data(model: Model, data: Dataset,
         assert len(all_outputs) == len(data)
 
         if compute_loss and total_ntokens > 0:
+            if n_gpu > 1:
+                total_loss = total_loss / n_gpu
+                total_n_correct = total_n_correct / n_gpu
             # total validation loss
-            valid_loss = total_loss
-            # exponent of token-level negative log prob
-            valid_ppl = torch.exp(total_loss / total_ntokens)
+            valid_loss = total_loss / total_nseqs
             # accuracy before decoding
             valid_acc = total_n_correct / total_ntokens
+            # exponent of token-level negative log prob
+            valid_ppl = torch.exp(total_loss / total_ntokens)
         else:
             valid_loss = -1
             valid_ppl = -1
@@ -157,14 +163,15 @@ def validate_on_data(model: Model, data: Dataset,
 
         # evaluate with metric on full dataset
         join_char = " " if level in ["word", "bpe"] else ""
-        valid_sources = [join_char.join(s) for s in data.src]
+        valid_sources = [join_char.join(s) for s in data.src] \
+            if task == "MT" else None
         valid_references = [join_char.join(t) for t in data.trg]
         valid_hypotheses = [join_char.join(t) for t in decoded_valid]
 
         # post-process
         if level == "bpe" and postprocess:
             valid_sources = [bpe_postprocess(s, bpe_type=bpe_type)
-                             for s in valid_sources]
+                             for s in valid_sources] if task == "MT" else None
             valid_references = [bpe_postprocess(v, bpe_type=bpe_type)
                                 for v in valid_references]
             valid_hypotheses = [bpe_postprocess(v, bpe_type=bpe_type)
@@ -307,6 +314,7 @@ def test(cfg_file,
 
     cfg = load_config(cfg_file)
     model_dir = cfg["training"]["model_dir"]
+    task = cfg["data"].get("task", "MT")
 
     if len(logger.handlers) == 0:
         _ = make_logger(model_dir, mode="test")   # version string returned
@@ -338,8 +346,27 @@ def test(cfg_file,
     # load model state from disk
     model_checkpoint = load_checkpoint(ckpt, use_cuda=use_cuda)
 
-    # build model and load parameters into it
+    # build model
     model = build_model(cfg["model"], src_vocab=src_vocab, trg_vocab=trg_vocab)
+    # objective: just for ctc decoding.
+    # in search.py, joeynmt accesses model class variables:
+    #       with_ctc = model.loss_function.require_ctc_layer
+    #       ctc_weight = model.loss_function.ctc_weight
+    label_smoothing = cfg["training"].get("label_smoothing", 0.0)
+    if cfg["training"].get("loss", "crossentropy") == "crossentropy-ctc":
+        ctc_weight = cfg["training"].get("ctc_weight", 0.3)
+        loss_function = XentCTCLoss(pad_index=model.pad_index,
+                                    bos_index=model.bos_index,
+                                    smoothing=label_smoothing,
+                                    ctc_weight=ctc_weight)
+    else:
+        loss_function = XentLoss(pad_index=model.pad_index,
+                                 smoothing=label_smoothing)
+    model.loss_function = loss_function
+    if not model.loss_function.require_ctc_layer:
+        model.decoder.ctc_output_layer = None
+    logger.info(model)
+    # load model parameters
     model.load_state_dict(model_checkpoint["model_state"])
     logger.info("Load model_state from %s.", ckpt)
 
@@ -354,14 +381,18 @@ def test(cfg_file,
         if data_set is None:
             continue
 
-        dataset_file = cfg["data"][data_set_name] + "." + cfg["data"]["trg"]
+        if task == "MT":
+            dataset_file = cfg["data"][data_set_name] + "." + cfg["data"]["trg"]
+        elif task == "s2t":
+            dataset_file = cfg["data"][data_set_name] + ".tsv"
         logger.info("Decoding on %s set (%s)...", data_set_name, dataset_file)
 
         #pylint: disable=unused-variable
-        scores, loss, ppl, acc, sources, sources_raw, references, hypotheses, \
+        scores, loss, ppl, acc, _, _, references, hypotheses, \
         hypotheses_raw, attention_scores = validate_on_data(
             model, data=data_set, batch_size=batch_size,
-            batch_class=Batch, batch_type=batch_type, level=level,
+            batch_class=SpeechBatch if task == "s2t" else Batch,
+            task=task, batch_type=batch_type, level=level,
             max_output_length=max_output_length, eval_metrics=eval_metrics,
             use_cuda=use_cuda, compute_loss=False, beam_size=beam_size,
             beam_alpha=beam_alpha, postprocess=postprocess,
@@ -387,7 +418,7 @@ def test(cfg_file,
                 logger.info("Saving attention plots. This might take a while..")
                 store_attention_plots(attentions=attention_scores,
                                       targets=hypotheses_raw,
-                                      sources=data_set.src,
+                                      sources=None, #data_set.src,
                                       indices=range(len(hypotheses)),
                                       output_prefix=attention_path)
                 logger.info("Attention plots saved to: %s", attention_path)
@@ -442,10 +473,11 @@ def translate(cfg_file: str,
     def _translate_data(test_data):
         """ Translates given dataset, using parameters from outer scope. """
         # pylint: disable=unused-variable
-        scores, loss, ppl, acc, sources, sources_raw, references, hypotheses, \
+        scores, loss, ppl, acc, _, _, references, hypotheses, \
         hypotheses_raw, attention_scores = validate_on_data(
             model, data=test_data, batch_size=batch_size,
-            batch_class=Batch, batch_type=batch_type, level=level,
+            batch_class=SpeechBatch if task == "s2t" else Batch,
+            task=task, batch_type=batch_type, level=level,
             max_output_length=max_output_length, eval_metrics=[],
             use_cuda=use_cuda, compute_loss=False, beam_size=beam_size,
             beam_alpha=beam_alpha, postprocess=postprocess,
@@ -454,6 +486,7 @@ def translate(cfg_file: str,
 
     cfg = load_config(cfg_file)
     model_dir = cfg["training"]["model_dir"]
+    task = cfg["data"].get("task", "MT")
 
     _ = make_logger(model_dir, mode="translate")
     # version string returned
@@ -463,11 +496,12 @@ def translate(cfg_file: str,
         ckpt = get_latest_checkpoint(model_dir)
 
     # read vocabs
-    src_vocab_file = cfg["data"].get("src_vocab",
-                                     os.path.join(model_dir, "src_vocab.txt"))
-    trg_vocab_file = cfg["data"].get("trg_vocab",
-                                     os.path.join(model_dir, "trg_vocab.txt"))
-    src_vocab = Vocabulary(file=src_vocab_file)
+    if task == "MT":
+        src_vocab_file = cfg["data"].get(
+            "src_vocab", os.path.join(model_dir, "src_vocab.txt"))
+        src_vocab = Vocabulary(file=src_vocab_file)
+    trg_vocab_file = cfg["data"].get(
+        "trg_vocab", os.path.join(model_dir, "trg_vocab.txt"))
     trg_vocab = Vocabulary(file=trg_vocab_file)
 
     data_cfg = cfg["data"]
@@ -476,12 +510,13 @@ def translate(cfg_file: str,
 
     tok_fun = lambda s: list(s) if level == "char" else s.split()
 
-    src_field = Field(init_token=None, eos_token=EOS_TOKEN,
-                      pad_token=PAD_TOKEN, tokenize=tok_fun,
-                      batch_first=True, lower=lowercase,
-                      unk_token=UNK_TOKEN,
-                      include_lengths=True)
-    src_field.vocab = src_vocab
+    if task == "MT":
+        src_field = Field(init_token=None, eos_token=EOS_TOKEN,
+                          pad_token=PAD_TOKEN, tokenize=tok_fun,
+                          batch_first=True, lower=lowercase,
+                          unk_token=UNK_TOKEN,
+                          include_lengths=True)
+        src_field.vocab = src_vocab
 
     # parse test args
     batch_size, batch_type, use_cuda, device, n_gpu, level, _, \
@@ -517,22 +552,25 @@ def translate(cfg_file: str,
                 print(hyp)
 
     else:
-        # enter interactive mode
-        batch_size = 1
-        batch_type = "sentence"
-        while True:
-            try:
-                src_input = input("\nPlease enter a source sentence "
-                                  "(pre-processed): \n")
-                if not src_input.strip():
+        if task == "MT":
+            # enter interactive mode
+            batch_size = 1
+            batch_type = "sentence"
+            while True:
+                try:
+                    src_input = input("\nPlease enter a source sentence "
+                                      "(pre-processed): \n")
+                    if not src_input.strip():
+                        break
+
+                    # every line has to be made into dataset
+                    test_data = _load_line_as_data(line=src_input)
+
+                    hypotheses = _translate_data(test_data)
+                    print("JoeyNMT: {}".format(hypotheses[0]))
+
+                except (KeyboardInterrupt, EOFError):
+                    print("\nBye.")
                     break
-
-                # every line has to be made into dataset
-                test_data = _load_line_as_data(line=src_input)
-
-                hypotheses = _translate_data(test_data)
-                print("JoeyNMT: {}".format(hypotheses[0]))
-
-            except (KeyboardInterrupt, EOFError):
-                print("\nBye.")
-                break
+        else:
+            raise Exception("interactive mode is not supported for s2t.")

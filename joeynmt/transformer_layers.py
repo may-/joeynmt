@@ -63,7 +63,7 @@ class MultiHeadedAttention(nn.Module):
 
         # compute scores
         q = q / math.sqrt(self.head_size)
-
+        
         # batch x num_heads x query_len x key_len
         scores = torch.matmul(q, k.transpose(2, 3))
 

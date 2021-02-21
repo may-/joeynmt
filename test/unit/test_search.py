@@ -8,6 +8,7 @@ from joeynmt.encoders import RecurrentEncoder
 from joeynmt.embeddings import Embeddings
 from joeynmt.model import Model
 from joeynmt.vocabulary import Vocabulary
+from joeynmt.loss import XentLoss, XentCTCLoss
 
 from .test_helpers import TensorTestCase
 
@@ -28,14 +29,15 @@ class TestSearch(TensorTestCase):
         self.vocab_size = len(self.vocab) # = 5
         seed = 42
         torch.manual_seed(seed)
-        #self.bos_index = 2
+        self.bos_index = 2
         self.pad_index = 1
         #self.eos_index = 3
+        self.ctc_weight = 0.0
 
 
 class TestSearchTransformer(TestSearch):
 
-    def _build(self, batch_size):
+    def _build(self, batch_size, **kwargs):
         src_time_dim = 4
         vocab_size = 7
 
@@ -46,7 +48,7 @@ class TestSearchTransformer(TestSearch):
             num_layers=self.num_layers, num_heads=self.num_heads,
             hidden_size=self.hidden_size, ff_size=self.ff_size,
             dropout=self.dropout, emb_dropout=self.dropout,
-            vocab_size=vocab_size)
+            vocab_size=vocab_size, **kwargs)
 
         encoder_output = torch.rand(
             size=(batch_size, src_time_dim, self.hidden_size))
@@ -61,6 +63,13 @@ class TestSearchTransformer(TestSearch):
         model = Model(encoder=None, decoder=decoder,
                       src_embed=emb, trg_embed=emb,
                       src_vocab=self.vocab, trg_vocab=self.vocab)
+
+        if isinstance(decoder.ctc_output_layer, torch.nn.Module):
+            model.loss_function = XentCTCLoss(pad_index=self.pad_index,
+                                              bos_index=self.bos_index,
+                                              ctc_weight=self.ctc_weight)
+        else:
+            model.loss_function = XentLoss(pad_index=self.pad_index)
         return src_mask, model, encoder_output, encoder_hidden
 
     def test_transformer_greedy(self):
@@ -68,6 +77,7 @@ class TestSearchTransformer(TestSearch):
         max_output_length = 3
         src_mask, model, encoder_output, encoder_hidden = self._build(
             batch_size=batch_size)
+        self.assertIsNone(model.decoder.ctc_output_layer)
         output, attention_scores = transformer_greedy(
             src_mask=src_mask, max_output_length=max_output_length, model=model,
             encoder_output=encoder_output, encoder_hidden=encoder_hidden)
@@ -76,6 +86,22 @@ class TestSearchTransformer(TestSearch):
         # batch x time
         self.assertEqual(output.shape, (batch_size, max_output_length))
         np.testing.assert_equal(output, [[5, 5, 5], [5, 5, 5]])
+
+    def test_transformer_greedy_ctc(self):
+        batch_size = 2
+        max_output_length = 3
+        kwargs = {"encoder_output_size_for_ctc": self.hidden_size}
+        src_mask, model, encoder_output, encoder_hidden = self._build(
+            batch_size=batch_size, **kwargs)
+        self.assertEqual(model.loss_function.ctc_weight, self.ctc_weight)
+        output, attention_scores = transformer_greedy(
+            src_mask=src_mask, max_output_length=max_output_length, model=model,
+            encoder_output=encoder_output, encoder_hidden=encoder_hidden)
+        # Transformer greedy doesn't return attention scores
+        self.assertIsNone(attention_scores)
+        # batch x time
+        self.assertEqual(output.shape, (batch_size, max_output_length))
+        np.testing.assert_equal(output, [[0, 0, 0], [0, 0, 0]])
 
     def test_transformer_beam1(self):
         batch_size = 2
@@ -153,6 +179,13 @@ class TestSearchRecurrent(TestSearch):
         model = Model(encoder=encoder, decoder=decoder,
                       src_embed=emb, trg_embed=emb,
                       src_vocab=self.vocab, trg_vocab=self.vocab)
+
+        if isinstance(decoder.ctc_output_layer, torch.nn.Module):
+            model.loss_function = XentCTCLoss(pad_index=self.pad_index,
+                                              bos_index=self.bos_index,
+                                              ctc_weight=self.ctc_weight)
+        else:
+            model.loss_function = XentLoss(pad_index=self.pad_index)
 
         return src_mask, model, encoder_output, encoder_hidden
 

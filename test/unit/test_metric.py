@@ -63,15 +63,15 @@ class TestMetrics(TensorTestCase):
             tokenize="13a", lowercase=True,
             remove_punctuation=False, level="word")
         score_with_punc = wer(
-            hyp, ref, tokenizer=eval_tokenizer_with_punc.tokenize, avg="macro")
-        self.assertAlmostEqual(score_with_punc, 46.667, places=3)
+            hyp, ref, tokenizer=eval_tokenizer_with_punc.tokenize)
+        self.assertAlmostEqual(score_with_punc, 80.0, places=3)
 
         eval_tokenizer_without_punc = EvaluationTokenizer(
             tokenize="13a", lowercase=True,
             remove_punctuation=True, level="word")
         score_without_punc = wer(
-            hyp, ref, tokenizer=eval_tokenizer_without_punc.tokenize, avg="macro")
-        self.assertAlmostEqual(score_without_punc, 46.154, places=3)
+            hyp, ref, tokenizer=eval_tokenizer_without_punc.tokenize)
+        self.assertAlmostEqual(score_without_punc, 75.0, places=3)
 
     def test_wer_level_char(self):
         hyp = ["this is a test."]
@@ -81,12 +81,12 @@ class TestMetrics(TensorTestCase):
             tokenize="13a", lowercase=True,
             remove_punctuation=False, level="char")
         score_with_punc = wer(
-            hyp, ref, tokenizer=eval_tokenizer_with_punc.tokenize, avg="macro")
-        self.assertAlmostEqual(score_with_punc, 31.034, places=3)
+            hyp, ref, tokenizer=eval_tokenizer_with_punc.tokenize)
+        self.assertAlmostEqual(score_with_punc, 46.667, places=3)
 
         eval_tokenizer_without_punc = EvaluationTokenizer(
             tokenize="13a", lowercase=True,
             remove_punctuation=True, level="char")
         score_without_punc = wer(
-            hyp, ref, tokenizer=eval_tokenizer_without_punc.tokenize, avg="macro")
-        self.assertAlmostEqual(score_without_punc, 32.0, places=3)
+            hyp, ref, tokenizer=eval_tokenizer_without_punc.tokenize)
+        self.assertAlmostEqual(score_without_punc, 46.154, places=3)

@@ -11,6 +11,7 @@ import logging
 import os
 import sys
 import collections
+from collections import defaultdict
 import pathlib
 import numpy as np
 
@@ -21,14 +22,15 @@ from torch.utils.tensorboard import SummaryWriter
 from torchtext.data import Dataset
 
 from joeynmt.model import build_model
-from joeynmt.batch import Batch
-from joeynmt.helpers import log_data_info, load_config, log_cfg, \
+from joeynmt.batch import Batch, SpeechBatch
+from joeynmt.helpers import load_config, log_cfg, \
     store_attention_plots, load_checkpoint, make_model_dir, \
     make_logger, set_seed, symlink_update, delete_ckpt, \
     latest_checkpoint_update, ConfigurationError
+from joeynmt.data_augmentation import SpecAugment
 from joeynmt.model import Model, _DataParallel
 from joeynmt.prediction import validate_on_data
-from joeynmt.loss import XentLoss
+from joeynmt.loss import XentLoss, XentCTCLoss
 from joeynmt.data import load_data, make_data_iter
 from joeynmt.builders import build_optimizer, build_scheduler, \
     build_gradient_clipper
@@ -61,6 +63,10 @@ class TrainManager:
         :param batch_class: batch class to encapsulate the torch class
         """
         train_config = config["training"]
+        self.task = config["data"].get("task", "MT")
+        if self.task not in {"MT", "s2t"}:
+            raise ConfigurationError("Invalid setting for `task`. "
+                                     "Valid options: 'MT', 's2t'.")
         self.batch_class = batch_class
 
         # files for logging and storing
@@ -76,12 +82,24 @@ class TrainManager:
 
         # model
         self.model = model
-        self._log_parameters_list()
+        self.model.log_parameters_list()
 
         # objective
-        self.label_smoothing = train_config.get("label_smoothing", 0.0)
-        self.model.loss_function = XentLoss(pad_index=self.model.pad_index,
-                                            smoothing=self.label_smoothing)
+        label_smoothing = train_config.get("label_smoothing", 0.0)
+        if train_config.get("loss", "crossentropy") == "crossentropy-ctc":
+            ctc_weight = train_config.get("ctc_weight", 0.3)
+            loss_function = XentCTCLoss(pad_index=self.model.pad_index,
+                                        bos_index=self.model.bos_index,
+                                        smoothing=label_smoothing,
+                                        ctc_weight=ctc_weight)
+        else:
+            loss_function = XentLoss(pad_index=self.model.pad_index,
+                                     smoothing=label_smoothing)
+        self.model.loss_function = loss_function
+        if not self.model.loss_function.require_ctc_layer:
+            self.model.decoder.ctc_output_layer = None
+        logger.info(self.model)
+
         self.normalization = train_config.get("normalization", "batch")
         if self.normalization not in ["batch", "tokens", "none"]:
             raise ConfigurationError("Invalid normalization option."
@@ -189,6 +207,12 @@ class TrainManager:
         # per-device eval_batch_size = self.eval_batch_size // self.n_gpu
         self.eval_batch_type = train_config.get("eval_batch_type",
                                                 self.batch_type)
+        # SpecAugment
+        if self.task == "s2t":
+            self.specaugment = None
+            if "specaugment" in config["data"].keys():
+                self.specaugment = SpecAugment(**config["data"]["specaugment"])
+                logger.info(self.specaugment)
 
         self.batch_multiplier = train_config.get("batch_multiplier", 1)
 
@@ -238,6 +262,8 @@ class TrainManager:
         if self.n_gpu > 1:
             self.model = _DataParallel(self.model)
 
+        ####### end __init__() #######
+
     def _save_checkpoint(self, new_best: bool = True) -> None:
         """
         Save the model's current parameters and the training state to a
@@ -251,6 +277,7 @@ class TrainManager:
           new checkpoint. If it is true, we update best.ckpt, else latest.ckpt.
         """
         model_path = os.path.join(self.model_dir, f"{self.stats.steps}.ckpt")
+        logger.info("Saving new checkpoint: %s", model_path)
         model_state_dict = self.model.module.state_dict() \
             if isinstance(self.model, torch.nn.DataParallel) \
             else self.model.state_dict()
@@ -441,16 +468,24 @@ class TrainManager:
             epoch_loss = 0
             batch_loss = 0
             batch_acc = 0
+            auxiliary_losses = defaultdict(float)
 
             for i, batch in enumerate(iter(self.train_iter)):
                 # create a Batch object from torchtext batch
+                kwargs = {}
+                if self.task=="s2t":
+                    kwargs["is_train"] = True
+                    kwargs["specaugment"] = self.specaugment
                 batch = self.batch_class(batch, self.model.pad_index,
-                                         use_cuda=self.use_cuda)
+                                         use_cuda=self.use_cuda, **kwargs)
 
                 # get batch loss
-                loss, acc = self._train_step(batch)
-                batch_loss += loss
-                batch_acc += acc
+                loss_dict = self._train_step(batch)
+                batch_loss += loss_dict['loss']
+                batch_acc += loss_dict['acc']
+                for k, v in loss_dict.items():
+                    if k != 'loss':
+                        auxiliary_losses[k] += v
 
                 # update!
                 if (i + 1) % self.batch_multiplier == 0:
@@ -487,6 +522,9 @@ class TrainManager:
                                                   batch_loss, self.stats.steps)
                         self.tb_writer.add_scalar("train/train_batch_acc",
                                                   batch_acc, self.stats.steps)
+                        for k, v in auxiliary_losses.items():
+                            self.tb_writer.add_scalar(f"train/train_batch_{k}",
+                                                      v, self.stats.steps)
                         elapsed = time.time() - start - total_valid_duration
                         elapsed_tokens = self.stats.total_tokens - start_tokens
                         logger.info(
@@ -503,6 +541,7 @@ class TrainManager:
                     epoch_loss += batch_loss    # accumulate epoch_loss
                     batch_loss = 0              # rest batch_loss
                     batch_acc = 0               # rest batch_acc
+                    auxiliary_losses = defaultdict(float)
 
                     # validate on the entire dev set
                     if self.stats.steps % self.validation_freq == 0:
@@ -547,13 +586,20 @@ class TrainManager:
         self.model.train()
 
         # get loss
-        batch_loss, _, _, correct_tokens = self.model(
+        auxiliary_losses = {}
+        batch_loss, nll_loss, ctc_loss, correct_tokens = self.model(
             return_type="loss", **vars(batch))
+        if torch.is_tensor(nll_loss): # nll_loss is not None
+            auxiliary_losses['nll_loss'] = nll_loss
+        if torch.is_tensor(ctc_loss): # ctc_loss is not None
+            auxiliary_losses['ctc_loss'] = ctc_loss
 
         # sum multi-gpu losses
         if self.n_gpu > 1:
             batch_loss = batch_loss.sum()
             correct_tokens = correct_tokens.sum()
+            for l in  auxiliary_losses.keys():
+                auxiliary_losses[l] = auxiliary_losses[l].sum()
 
         # normalize batch loss
         if self.normalization == "batch":
@@ -567,6 +613,8 @@ class TrainManager:
                                       "or summation of loss 'none' implemented")
 
         norm_batch_loss = batch_loss / normalizer
+        for l in  auxiliary_losses.keys():
+            auxiliary_losses[l] = auxiliary_losses[l] / normalizer
 
         if self.n_gpu > 1:
             norm_batch_loss = norm_batch_loss / self.n_gpu
@@ -574,6 +622,8 @@ class TrainManager:
 
         if self.batch_multiplier > 1:
             norm_batch_loss = norm_batch_loss / self.batch_multiplier
+            for l in  auxiliary_losses.keys():
+                auxiliary_losses[l] = auxiliary_losses[l] / self.batch_multiplier
 
         # accumulate gradients
         if self.fp16:
@@ -585,7 +635,10 @@ class TrainManager:
         # increment token counter
         self.stats.total_tokens += batch.ntokens
 
-        return norm_batch_loss.item(), (correct_tokens/batch.ntokens).item()
+        ret = {'loss': norm_batch_loss.item(),
+               'acc': (correct_tokens/batch.ntokens).item()}
+        ret.update(auxiliary_losses)
+        return ret
 
     def _validate(self, valid_data, epoch_no):
         valid_start_time = time.time()
@@ -607,7 +660,8 @@ class TrainManager:
                 postprocess=True,           # always remove BPE for validation
                 bpe_type=self.bpe_type,     # "subword-nmt" or "sentencepiece"
                 sacrebleu=self.sacrebleu,   # sacrebleu options
-                n_gpu=self.n_gpu
+                n_gpu=self.n_gpu,
+                task=self.task
             )
 
 
@@ -656,11 +710,13 @@ class TrainManager:
                          eval_metrics=self.eval_metrics,
                          new_best=new_best)
 
-        self._log_examples(sources_raw=[v for v in valid_sources_raw],
-                           sources=valid_sources,
-                           hypotheses_raw=valid_hypotheses_raw,
-                           hypotheses=valid_hypotheses,
-                           references=valid_references)
+        self._log_examples(
+            sources_raw=[v for v in valid_sources_raw] \
+                if self.task=="MT" else None,
+            sources=valid_sources if self.task=="MT" else None,
+            hypotheses_raw=valid_hypotheses_raw,
+            hypotheses=valid_hypotheses,
+            references=valid_references)
 
         valid_duration = time.time() - valid_start_time
         score_str = ""
@@ -678,14 +734,16 @@ class TrainManager:
 
         # store attention plots for selected valid sentences
         if valid_attention_scores:
-            store_attention_plots(attentions=valid_attention_scores,
-                                  targets=valid_hypotheses_raw,
-                                  sources=[s for s in valid_data.src],
-                                  indices=self.log_valid_sents,
-                                  output_prefix=os.path.join(
-                                      self.model_dir,f"att.{self.stats.steps}"),
-                                  tb_writer=self.tb_writer,
-                                  steps=self.stats.steps)
+            store_attention_plots(
+                attentions=valid_attention_scores,
+                targets=valid_hypotheses_raw,
+                sources=[s for s in valid_data.src] \
+                    if self.task== "MT" else None,
+                indices=self.log_valid_sents,
+                output_prefix=os.path.join(
+                    self.model_dir, f"att.{self.stats.steps}"),
+                tb_writer=self.tb_writer,
+                steps=self.stats.steps)
 
         return valid_duration
 
@@ -741,25 +799,25 @@ class TrainManager:
         assert trainable_params
 
     def _log_examples(self,
-                      sources: List[str],
                       hypotheses: List[str],
                       references: List[str],
-                      sources_raw: List[List[str]] = None,
+                      sources: List[str] = None,
                       hypotheses_raw: List[List[str]] = None,
-                      references_raw: List[List[str]] = None) -> None:
+                      references_raw: List[List[str]] = None,
+                      sources_raw: List[List[str]] = None,) -> None:
         """
         Log a the first `self.log_valid_sents` sentences from given examples.
 
-        :param sources: decoded sources (list of strings)
         :param hypotheses: decoded hypotheses (list of strings)
         :param references: decoded references (list of strings)
-        :param sources_raw: raw sources (list of list of tokens)
+        :param sources: decoded sources (list of strings)
         :param hypotheses_raw: raw hypotheses (list of list of tokens)
         :param references_raw: raw references (list of list of tokens)
+        :param sources_raw: raw sources (list of list of tokens)
         """
         for p in self.log_valid_sents:
 
-            if p >= len(sources):
+            if p >= len(hypotheses):
                 continue
 
             logger.info("Example #%d", p)
@@ -770,8 +828,8 @@ class TrainManager:
                 logger.debug("\tRaw reference:  %s", references_raw[p])
             if hypotheses_raw is not None:
                 logger.debug("\tRaw hypothesis: %s", hypotheses_raw[p])
-
-            logger.info("\tSource:     %s", sources[p])
+            if sources is not None:
+                logger.info("\tSource:     %s", sources[p])
             logger.info("\tReference:  %s", references[p])
             logger.info("\tHypothesis: %s", hypotheses[p])
 
@@ -827,7 +885,11 @@ def train(cfg_file: str) -> None:
 
     :param cfg_file: path to configuration yaml file
     """
+    # read config file
     cfg = load_config(cfg_file)
+    log_cfg(cfg) # write all entries of config to the log
+
+    task = cfg["data"]["task"]  # "MT" or "s2t"
 
     # make logger
     model_dir = make_model_dir(cfg["training"]["model_dir"],
@@ -835,6 +897,9 @@ def train(cfg_file: str) -> None:
                                    "overwrite", False))
     _ = make_logger(model_dir, mode="train")  # version string returned
     # TODO: save version number in model checkpoints
+
+    # store copy of original training config in model dir
+    shutil.copy2(cfg_file, os.path.join(model_dir, "config.yaml"))
 
     # set the random seed
     set_seed(seed=cfg["training"].get("random_seed", 42))
@@ -847,26 +912,15 @@ def train(cfg_file: str) -> None:
     model = build_model(cfg["model"], src_vocab=src_vocab, trg_vocab=trg_vocab)
 
     # for training management, e.g. early stopping and model selection
-    trainer = TrainManager(model=model, config=cfg)
-
-    # store copy of original training config in model dir
-    shutil.copy2(cfg_file, os.path.join(model_dir, "config.yaml"))
-
-    # log all entries of config
-    log_cfg(cfg)
-
-    log_data_info(train_data=train_data,
-                  valid_data=dev_data,
-                  test_data=test_data,
-                  src_vocab=src_vocab,
-                  trg_vocab=trg_vocab)
-
-    logger.info(str(model))
+    trainer = TrainManager(model=model, config=cfg,
+                           batch_class=SpeechBatch if task=="s2t" else Batch)
 
     # store the vocabs
-    src_vocab_file = os.path.join(cfg["training"]["model_dir"], "src_vocab.txt")
+    if task == "MT":
+        src_vocab_file = os.path.join(
+            cfg["training"]["model_dir"], "src_vocab.txt")
+        src_vocab.to_file(src_vocab_file)
     trg_vocab_file = os.path.join(cfg["training"]["model_dir"], "trg_vocab.txt")
-    src_vocab.to_file(src_vocab_file)
     trg_vocab.to_file(trg_vocab_file)
 
     # train the model

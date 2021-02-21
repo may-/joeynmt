@@ -72,7 +72,7 @@ class TestRecurrentEncoder(TensorTestCase):
         # no padding, no mask
         x_length = torch.Tensor([time_dim]*batch_size).int()
         mask = torch.ones_like(x)
-        output, hidden = encoder(embed_src=x, src_length=x_length, mask=mask)
+        output, hidden, mask = encoder(embed_src=x, src_length=x_length, mask=mask)
         self.assertEqual(output.shape, torch.Size(
             [batch_size, time_dim, directions*self.hidden_size]))
         self.assertEqual(hidden.shape, torch.Size(
@@ -104,5 +104,6 @@ class TestRecurrentEncoder(TensorTestCase):
           -0.1608, -0.1140, -0.1646,  0.0796, -0.0202, -0.0207,  0.0379]]]])
         self.assertTensorAlmostEqual(hidden_target, hidden)
         self.assertTensorAlmostEqual(output_target, output)
+        #self.assertTensorAlmostEqual(mask_target, mask)
 
 

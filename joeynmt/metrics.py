@@ -154,4 +154,4 @@ class EvaluationTokenizer:
         if self.lowercase:
             tokenized = tokenized.lower()
 
-        return tokenized
+        return tokenized.split()

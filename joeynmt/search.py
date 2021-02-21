@@ -71,7 +71,7 @@ def recurrent_greedy(
         # decode one single step
         with torch.no_grad():
             logits, hidden, att_probs, prev_att_vector = model(
-                return_type="decode",
+                return_type="decode", # ctc_decoding not enabled
                 trg_input=prev_y,
                 encoder_output=encoder_output,
                 encoder_hidden=encoder_hidden,
@@ -120,6 +120,8 @@ def transformer_greedy(
     bos_index = model.bos_index
     eos_index = model.eos_index
     batch_size = src_mask.size(0)
+    with_ctc = model.loss_function.require_ctc_layer # bool
+    ctc_weight = model.loss_function.ctc_weight if with_ctc else 0.0
 
     # start with BOS-symbol for each sentence in the batch
     ys = encoder_output.new_full([batch_size, 1], bos_index, dtype=torch.long)
@@ -135,8 +137,8 @@ def transformer_greedy(
     for _ in range(max_output_length):
         # pylint: disable=unused-variable
         with torch.no_grad():
-            logits, _, _, _ = model(
-                return_type="decode",
+            nll_logits, _, _, ctc_logits = model(
+                return_type="decode_ctc" if with_ctc else "decode",
                 trg_input=ys, # model.trg_embed(ys) # embed the previous tokens
                 encoder_output=encoder_output,
                 encoder_hidden=None,
@@ -146,7 +148,12 @@ def transformer_greedy(
                 trg_mask=trg_mask
             )
 
-            logits = logits[:, -1]
+            if with_ctc and torch.is_tensor(ctc_logits):
+                assert ctc_logits[:, -1].size() == nll_logits[:, -1].size()
+                # linear interpolation of nll_loss and ctc_loss
+                logits = (1-ctc_weight) * nll_logits[:, -1] + ctc_weight * ctc_logits[:, -1]
+            else: # default: Xent logits
+                logits = nll_logits[:, -1]
             _, next_word = torch.max(logits, dim=1)
             next_word = next_word.data
             ys = torch.cat([ys, next_word.unsqueeze(-1)], dim=1)
@@ -199,6 +206,8 @@ def beam_search(model: Model, size: int,
     att_vectors = None  # not used for Transformer
     hidden = None       # not used for Transformer
     trg_mask = None     # not used for RNN
+    with_ctc = model.loss_function.require_ctc_layer # bool
+    ctc_weight = model.loss_function.ctc_weight if with_ctc else 0.0
 
     # Recurrent models only: initialize RNN hidden state
     # pylint: disable=protected-access
@@ -260,37 +269,51 @@ def beam_search(model: Model, size: int,
     }
 
     for step in range(max_output_length):
-        # This decides which part of the predicted sentence we feed to the
-        # decoder to make the next prediction.
-        # For Transformer, we feed the complete predicted sentence so far.
-        # For Recurrent models, only feed the previous target word prediction
-        if transformer:  # Transformer
-            decoder_input = alive_seq  # complete prediction so far
-        else:  # Recurrent
-            decoder_input = alive_seq[:, -1].view(-1, 1)  # only the last word
-
-        # expand current hypotheses
-        # decode one single step
-        # logits: logits for final softmax
-        # pylint: disable=unused-variable
-        with torch.no_grad():
-            logits, hidden, att_scores, att_vectors = model(
-                return_type="decode",
-                encoder_output=encoder_output,
-                encoder_hidden=None, # used to initialize decoder_hidden only
-                src_mask=src_mask,
-                trg_input=decoder_input, #trg_embed = embed(decoder_input)
-                decoder_hidden=hidden,
-                att_vector=att_vectors,
-                unroll_steps=1,
-                trg_mask=trg_mask  # subsequent mask for Transformer only
-            )
-
-        # For the Transformer we made predictions for all time steps up to
-        # this point, so we only want to know about the last time step.
         if transformer:
-            logits = logits[:, -1]  # keep only the last time step
-            hidden = None           # we don't need to keep it for transformer
+            # This decides which part of the predicted sentence we feed to the
+            # decoder to make the next prediction.
+            # For Transformer, we feed the complete predicted sentence so far.
+            decoder_input = alive_seq  # complete prediction so far
+
+            # expand current hypotheses
+            # decode one single step
+            # logits: logits for final softmax
+            # pylint: disable=unused-variable
+            with torch.no_grad():
+                nll_logits, _, _, ctc_logits = model(
+                    return_type="decode_ctc" if with_ctc else "decode",
+                    encoder_output=encoder_output,
+                    encoder_hidden=None,    # used to initialize decoder_hidden only
+                    src_mask=src_mask,
+                    trg_input=decoder_input, #trg_embed = embed(decoder_input)
+                    decoder_hidden=None,    # we don't need to keep it for transformer
+                    att_vector=None,        # we don't need to keep it for transformer
+                    unroll_steps=1,
+                    trg_mask=trg_mask       # subsequent mask for Transformer only
+                )
+
+            # For the Transformer we made predictions for all time steps up to
+            # this point, so we only want to know about the last time step.
+            if with_ctc and torch.is_tensor(ctc_logits):
+                logits = (1-ctc_weight) * nll_logits[:, -1] + ctc_weight * ctc_logits[:, -1]
+            else: # default: Xent logits
+                logits = nll_logits[:, -1] # keep only the last time step
+            hidden = None
+        else:
+            # For Recurrent models, only feed the previous target word prediction
+            decoder_input = alive_seq[:, -1].view(-1, 1)  # only the last word
+            with torch.no_grad():
+                logits, hidden, att_scores, att_vectors = model(
+                    return_type="decode",
+                    encoder_output=encoder_output,
+                    encoder_hidden=None, # used to initialize decoder_hidden only
+                    src_mask=src_mask,
+                    trg_input=decoder_input, #trg_embed = embed(decoder_input)
+                    decoder_hidden=hidden,
+                    att_vector=att_vectors,
+                    unroll_steps=1,
+                    trg_mask=None  # subsequent mask for Transformer only
+                )
 
         # batch*k x trg_vocab
         log_probs = F.log_softmax(logits, dim=-1).squeeze(1)
@@ -430,8 +453,14 @@ def run_batch(model: Model, batch: Batch, max_output_length: int,
         stacked_attention_scores: attention scores for batch
     """
     with torch.no_grad():
-        encoder_output, encoder_hidden, _, _ = model(
+        encoder_output, encoder_hidden, src_mask, _ = model(
             return_type="encode", **vars(batch))
+        #unpad
+        max_len = src_mask.sum(-1).max(dim=0).values.item()
+        if encoder_output.size(1) < max_len:    #(only if multi-gpu)
+            encoder_output = encoder_output[:, :max_len, :]
+        if src_mask.size(2) < max_len:          #(only if multi-gpu)
+            src_mask = src_mask[:, :, :max_len]
 
     # if maximum output length is not globally specified, adapt to src len
     if max_output_length is None:
@@ -440,7 +469,7 @@ def run_batch(model: Model, batch: Batch, max_output_length: int,
     # greedy decoding
     if beam_size < 2:
         stacked_output, stacked_attention_scores = greedy(
-            src_mask=batch.src_mask,
+            src_mask=src_mask,
             max_output_length=max_output_length,
             model=model,
             encoder_output=encoder_output,
@@ -452,7 +481,7 @@ def run_batch(model: Model, batch: Batch, max_output_length: int,
             size=beam_size,
             encoder_output=encoder_output,
             encoder_hidden=encoder_hidden,
-            src_mask=batch.src_mask,
+            src_mask=src_mask,
             max_output_length=max_output_length,
             alpha=beam_alpha)
 

@@ -5,6 +5,7 @@ Module to represents whole models
 from typing import Callable
 import logging
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch import Tensor
@@ -29,27 +30,27 @@ class Model(nn.Module):
     def __init__(self,
                  encoder: Encoder,
                  decoder: Decoder,
-                 src_embed: Embeddings,
                  trg_embed: Embeddings,
-                 src_vocab: Vocabulary,
-                 trg_vocab: Vocabulary) -> None:
+                 trg_vocab: Vocabulary,
+                 src_embed: Embeddings = None,
+                 src_vocab: Vocabulary = None) -> None:
         """
         Create a new encoder-decoder model
 
         :param encoder: encoder
         :param decoder: decoder
-        :param src_embed: source embedding
         :param trg_embed: target embedding
-        :param src_vocab: source vocabulary
         :param trg_vocab: target vocabulary
+        :param src_embed: source embedding
+        :param src_vocab: source vocabulary
         """
         super().__init__()
 
-        self.src_embed = src_embed
+        self.src_embed = src_embed # None if task == "s2t"
         self.trg_embed = trg_embed
         self.encoder = encoder
         self.decoder = decoder
-        self.src_vocab = src_vocab
+        self.src_vocab = src_vocab # None if task == "s2t"
         self.trg_vocab = trg_vocab
         self.bos_index = self.trg_vocab.stoi[BOS_TOKEN]
         self.pad_index = self.trg_vocab.stoi[PAD_TOKEN]
@@ -79,46 +80,59 @@ class Model(nn.Module):
             raise ValueError("Please specify return_type: "
                              "{`loss`, `encode`, `decode`}.")
 
-        return_tuple = (None, None, None, None)
+        return_tuple = [None, None, None, None]
         if return_type == "loss":
             assert self.loss_function is not None
 
-            out, _, _, _ = self._encode_decode(**kwargs)
+            dec_out, ctc_out, src_mask = self._encode_decode(**kwargs)
 
             # compute log probs
-            log_probs = F.log_softmax(out, dim=-1)
+            log_probs = F.log_softmax(dec_out, dim=-1)
 
             # compute batch loss
-            batch_loss = self.loss_function(log_probs, kwargs["trg"])
+            if self.loss_function.require_ctc_layer and isinstance(ctc_out, Tensor):
+                kwargs["src_mask"] = src_mask # pass through subsampled mask
+                kwargs["ctc_log_probs"] = F.log_softmax(ctc_out, dim=-1)
+            batch_loss = self.loss_function(log_probs, **kwargs)
+            assert type(batch_loss) is tuple and len(batch_loss) > 0
+
+            # return batch loss
+            #     = sum over all elements in batch that are not pad
+            for i, loss in enumerate(list(batch_loss)):
+                return_tuple[i] = loss
 
             # count correct tokens before decoding (for accuracy)
             trg_mask = kwargs["trg_mask"].squeeze(1)
             assert kwargs["trg"].size() == trg_mask.size()
             n_correct = torch.sum(log_probs.argmax(-1).masked_select(
                 trg_mask).eq(kwargs["trg"].masked_select(trg_mask)))
-
-            # return batch loss
-            #     = sum over all elements in batch that are not pad
-            return_tuple = (batch_loss, None, None, n_correct)
+            return_tuple[-1] = n_correct
 
         elif return_type == "encode":
-            encoder_output, encoder_hidden = self._encode(**kwargs)
+            kwargs["pad"] = True #TODO: only if multi-gpu
+            encoder_output, encoder_hidden, src_mask, = self._encode(**kwargs)
 
             # return encoder outputs
-            return_tuple = (encoder_output, encoder_hidden, None, None)
+            return_tuple = (encoder_output, encoder_hidden, src_mask, None)
 
         elif return_type == "decode":
-            outputs, hidden, att_probs, att_vectors = self._decode(**kwargs)
+            outputs, hidden, att_probs, att_vectors, _ = self._decode(**kwargs)
 
             # return decoder outputs
             return_tuple = (outputs, hidden, att_probs, att_vectors)
 
-        return return_tuple
+        elif return_type == "decode_ctc":
+            outputs, hidden, _, _, ctc_out = self._decode(**kwargs)
+
+            # return decoder outputs with ctc
+            return_tuple = (outputs, hidden, _, ctc_out)
+
+        return tuple(return_tuple)
 
     # pylint: disable=arguments-differ
     def _encode_decode(self, src: Tensor, trg_input: Tensor, src_mask: Tensor,
                        src_length: Tensor, trg_mask: Tensor = None, **kwargs) \
-            -> (Tensor, Tensor, Tensor, Tensor):
+            -> (Tensor, Tensor, Tensor):
         """
         First encodes the source sentence.
         Then produces the target one word at a time.
@@ -130,37 +144,43 @@ class Model(nn.Module):
         :param trg_mask: target mask
         :return: decoder outputs
         """
-        encoder_output, encoder_hidden = self._encode(src=src,
-                                                      src_length=src_length,
-                                                      src_mask=src_mask,
-                                                      **kwargs)
+        encoder_output, encoder_hidden, src_mask = self._encode(
+            src=src, src_length=src_length, src_mask=src_mask, **kwargs)
 
         unroll_steps = trg_input.size(1)
-        assert "decoder_hidden" not in kwargs.keys()
-        return self._decode(encoder_output=encoder_output,
-                            encoder_hidden=encoder_hidden,
-                            src_mask=src_mask, trg_input=trg_input,
-                            unroll_steps=unroll_steps,
-                            trg_mask=trg_mask, **kwargs)
+
+        decoder_output, _, _, _, ctc_output = self._decode(
+            encoder_output=encoder_output,
+            encoder_hidden=encoder_hidden,
+            src_mask=src_mask,
+            trg_input=trg_input,
+            unroll_steps=unroll_steps,
+            trg_mask=trg_mask,
+            **kwargs)
+
+        return decoder_output, ctc_output, src_mask
 
     def _encode(self, src: Tensor, src_length: Tensor, src_mask: Tensor,
-                **_kwargs) -> (Tensor, Tensor):
+                **_kwargs) -> (Tensor, Tensor, Tensor):
         """
         Encodes the source sentence.
 
         :param src:
         :param src_length:
         :param src_mask:
-        :return: encoder outputs (output, hidden_concat)
+        :returns:
+            - encoder_outputs
+            - hidden_concat
+            - src_mask
         """
-        return self.encoder(self.src_embed(src), src_length, src_mask,
-                            **_kwargs)
+        src_input = src if self.src_embed is None else self.src_embed(src)
+        return self.encoder(src_input, src_length, src_mask, **_kwargs)
 
     def _decode(self, encoder_output: Tensor, encoder_hidden: Tensor,
                 src_mask: Tensor, trg_input: Tensor,
                 unroll_steps: int, decoder_hidden: Tensor = None,
                 att_vector: Tensor = None, trg_mask: Tensor = None, **_kwargs) \
-            -> (Tensor, Tensor, Tensor, Tensor):
+            -> (Tensor, Tensor, Tensor, Tensor, Tensor):
         """
         Decode, given an encoded source sentence.
 
@@ -172,7 +192,12 @@ class Model(nn.Module):
         :param decoder_hidden: decoder hidden state (optional)
         :param att_vector: previous attention vector (optional)
         :param trg_mask: mask for target steps
-        :return: decoder outputs (outputs, hidden, att_probs, att_vectors)
+        :returns: decoder outputs
+            - decoder_output
+            - decoder_hidden
+            - att_prob
+            - att_vector
+            - ctc_output
         """
         return self.decoder(trg_embed=self.trg_embed(trg_input),
                             encoder_output=encoder_output,
@@ -194,9 +219,23 @@ class Model(nn.Module):
                "\tencoder=%s,\n" \
                "\tdecoder=%s,\n" \
                "\tsrc_embed=%s,\n" \
-               "\ttrg_embed=%s)" % (self.__class__.__name__, self.encoder,
+               "\ttrg_embed=%s,\n" \
+               "\tloss_function=%r\n)" % (self.__class__.__name__, self.encoder,
                                     self.decoder, self.src_embed,
-                                    self.trg_embed)
+                                    self.trg_embed, self.loss_function)
+
+    def log_parameters_list(self):
+        """
+        Write all model parameters (name, shape) to the log.
+        """
+        model_parameters = filter(lambda p: p.requires_grad,
+                                  self.parameters())
+        n_params = sum([np.prod(p.size()) for p in model_parameters])
+        logger.info("Total params: %d", n_params)
+        trainable_params = [n for (n, p) in self.named_parameters()
+                            if p.requires_grad]
+        logger.debug("Trainable parameters: %s", sorted(trainable_params))
+        assert trainable_params
 
 
 class _DataParallel(nn.DataParallel):
@@ -220,17 +259,18 @@ def build_model(cfg: dict = None,
     :return: built and initialized model
     """
     logger.info("Building an encoder-decoder model...")
-    src_padding_idx = src_vocab.stoi[PAD_TOKEN]
+    task = "s2t" if src_vocab is None else "MT"
+    src_padding_idx = src_vocab.stoi[PAD_TOKEN] if task == "MT" else None
     trg_padding_idx = trg_vocab.stoi[PAD_TOKEN]
 
     src_embed = Embeddings(
         **cfg["encoder"]["embeddings"], vocab_size=len(src_vocab),
-        padding_idx=src_padding_idx)
+        padding_idx=src_padding_idx) if task == "MT" else None
 
     # this ties source and target embeddings
     # for softmax layer tying, see further below
     if cfg.get("tied_embeddings", False):
-        if src_vocab.itos == trg_vocab.itos:
+        if task == "MT" and src_vocab.itos == trg_vocab.itos:
             # share embeddings for src and trg
             trg_embed = src_embed
         else:
@@ -245,14 +285,19 @@ def build_model(cfg: dict = None,
     enc_dropout = cfg["encoder"].get("dropout", 0.)
     enc_emb_dropout = cfg["encoder"]["embeddings"].get("dropout", enc_dropout)
     if cfg["encoder"].get("type", "recurrent") == "transformer":
-        assert cfg["encoder"]["embeddings"]["embedding_dim"] == \
-               cfg["encoder"]["hidden_size"], \
-               "for transformer, emb_size must be hidden_size"
-
+        if task == "MT":
+            assert cfg["encoder"]["embeddings"]["embedding_dim"] == \
+                   cfg["encoder"]["hidden_size"], \
+                   "for transformer, emb_size must be hidden_size"
+            emb_size = src_embed.embedding_dim
+        else:
+            emb_size = cfg["encoder"]["embeddings"]["embedding_dim"]
+            # must be same as num_freq
         encoder = TransformerEncoder(**cfg["encoder"],
-                                     emb_size=src_embed.embedding_dim,
+                                     emb_size=emb_size,
                                      emb_dropout=enc_emb_dropout)
     else:
+        assert task == "MT", "recurrent model not supported for s2t task. use transformer."
         encoder = RecurrentEncoder(**cfg["encoder"],
                                    emb_size=src_embed.embedding_dim,
                                    emb_dropout=enc_emb_dropout)
@@ -261,10 +306,12 @@ def build_model(cfg: dict = None,
     dec_dropout = cfg["decoder"].get("dropout", 0.)
     dec_emb_dropout = cfg["decoder"]["embeddings"].get("dropout", dec_dropout)
     if cfg["decoder"].get("type", "recurrent") == "transformer":
+        dec_kwargs = {"encoder_output_size_for_ctc": encoder._output_size}
         decoder = TransformerDecoder(
             **cfg["decoder"], encoder=encoder, vocab_size=len(trg_vocab),
-            emb_size=trg_embed.embedding_dim, emb_dropout=dec_emb_dropout)
+            emb_size=trg_embed.embedding_dim, emb_dropout=dec_emb_dropout, **dec_kwargs)
     else:
+        assert task == "MT", "recurrent model not supported for s2t task. use transformer."
         decoder = RecurrentDecoder(
             **cfg["decoder"], encoder=encoder, vocab_size=len(trg_vocab),
             emb_size=trg_embed.embedding_dim, emb_dropout=dec_emb_dropout)
@@ -301,4 +348,5 @@ def build_model(cfg: dict = None,
         model.trg_embed.load_from_file(pretrained_dec_embed_path, trg_vocab)
 
     logger.info("Enc-dec model built.")
+    #logger.info(str(model)) log model details after loss_function instantiation
     return model

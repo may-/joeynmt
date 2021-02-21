@@ -3,6 +3,7 @@
 Collection of builder functions
 """
 from typing import Callable, Optional, Generator
+import logging
 
 import torch
 from torch import nn
@@ -11,6 +12,8 @@ from torch.optim.lr_scheduler import _LRScheduler, ReduceLROnPlateau, \
 from torch.optim import Optimizer
 
 from joeynmt.helpers import ConfigurationError
+
+logger = logging.getLogger(__name__)
 
 
 def build_gradient_clipper(config: dict) -> Optional[Callable]:
@@ -74,13 +77,12 @@ def build_optimizer(config: dict, parameters: Generator) -> Optimizer:
     optimizer_name = config.get("optimizer", "sgd").lower()
     learning_rate = config.get("learning_rate", 3.0e-4)
     weight_decay = config.get("weight_decay", 0)
-
+    kwargs = {}
     if optimizer_name == "adam":
-        adam_betas = config.get("adam_betas", (0.9, 0.999))
+        kwargs["betas"] = config.get("adam_betas", (0.9, 0.999))
         optimizer = torch.optim.Adam(parameters,
                                      weight_decay=weight_decay,
-                                     lr=learning_rate,
-                                     betas=adam_betas)
+                                     lr=learning_rate, **kwargs)
     elif optimizer_name == "adagrad":
         optimizer = torch.optim.Adagrad(parameters,
                                         weight_decay=weight_decay,
@@ -101,6 +103,11 @@ def build_optimizer(config: dict, parameters: Generator) -> Optimizer:
     else:
         raise ConfigurationError("Invalid optimizer. Valid options: 'adam', "
                                  "'adagrad', 'adadelta', 'rmsprop', 'sgd'.")
+
+    kwargs_str = ", ".join([f'{k}={v}' for k, v in kwargs.items()])
+    logger.info("%s(weight_decay=%f, lr=%f%s)" % (
+        optimizer.__class__.__name__, weight_decay, learning_rate,
+        ", " + kwargs_str if len(kwargs) > 0 else ""))
     return optimizer
 
 
@@ -190,6 +197,8 @@ def build_scheduler(config: dict, optimizer: Optimizer, scheduler_mode: str,
                 optimizer=optimizer,
                 peak_rate=peak_rate)
             scheduler_step_at = "step"
+
+    logger.info(str(scheduler))
     return scheduler, scheduler_step_at
 
 
@@ -281,6 +290,10 @@ class NoamScheduler(BaseScheduler):
         self.factor = state_dict["factor"]
         self.hidden_size = state_dict["hidden_size"]
 
+    def __repr__(self):
+        return "%s(warmup=%d, factor=%f, hidden_size=%d)" % (
+            self.__class__.__name__, self.warmup, self.factor, self.hidden_size)
+
 
 class WarmupExponentialDecayScheduler(BaseScheduler):
     """
@@ -346,6 +359,12 @@ class WarmupExponentialDecayScheduler(BaseScheduler):
         self.decay_rate = state_dict['decay_rate']
         self.min_rate = state_dict['min_rate']
 
+    def __repr__(self):
+        return "%s(warmup=%d, decay_length=%d, decay_rate=%f, " \
+               "peak_rate=%f, min_rate=%f)" % (
+            self.__class__.__name__, self.warmup, self.decay_length,
+            self.decay_rate, self.peak_rate, self.min_rate)
+
 # from fairseq
 class WarmupInverseSquareRootScheduler(BaseScheduler):
     """Decay the LR based on the inverse square root of the update number.
@@ -404,3 +423,8 @@ class WarmupInverseSquareRootScheduler(BaseScheduler):
         self.decay_rate = state_dict['decay_rate']
         self.peak_rate = state_dict['peak_rate']
         self.min_rate = state_dict['min_rate']
+
+    def __repr__(self):
+        return "%s(warmup=%d, decay_rate=%f, peak_rate=%f, min_rate=%f)" % (
+            self.__class__.__name__, self.warmup, self.decay_rate,
+            self.peak_rate, self.min_rate)

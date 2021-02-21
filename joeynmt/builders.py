@@ -61,6 +61,7 @@ def build_optimizer(config: dict, parameters: Generator) -> Optimizer:
         - "adagrad": see `torch.optim.adagrad`
         - "adadelta": see `torch.optim.adadelta`
         - "rmsprop": see `torch.optim.RMSprop`
+        - "sam": see https://github.com/davda54/sam
 
     The initial learning rate is set according to "learning_rate" in the config.
     The weight decay is set according to "weight_decay" in the config.
@@ -77,9 +78,21 @@ def build_optimizer(config: dict, parameters: Generator) -> Optimizer:
     optimizer_name = config.get("optimizer", "sgd").lower()
     learning_rate = config.get("learning_rate", 3.0e-4)
     weight_decay = config.get("weight_decay", 0)
+
     kwargs = {}
-    if optimizer_name == "adam":
-        kwargs["betas"] = config.get("adam_betas", (0.9, 0.999))
+    if optimizer_name == "sam":
+        try:
+            from sam import SAM
+            kwargs = {"lr": learning_rate,
+                      "weight_decay": weight_decay,
+                      "momentum": config.get("momentum", 0.9),
+                      "base_optimizer": torch.optim.SGD,
+                      "rho": config.get("sam_roh", 0.05)} # size of the neighbourhood
+            optimizer = SAM(parameters, **kwargs)
+        except:
+            raise ImportError("Please install SAM (Sharpness-aware Minimizer).")
+    elif optimizer_name == "adam":
+        kwargs = {"betas": config.get("adam_betas", (0.9, 0.999))}
         optimizer = torch.optim.Adam(parameters,
                                      weight_decay=weight_decay,
                                      lr=learning_rate, **kwargs)
@@ -97,12 +110,14 @@ def build_optimizer(config: dict, parameters: Generator) -> Optimizer:
                                         lr=learning_rate)
     elif optimizer_name == "sgd":
         # default
+        momentum = config.get("momentum", 0.0)
         optimizer = torch.optim.SGD(parameters,
                                     weight_decay=weight_decay,
-                                    lr=learning_rate)
+                                    lr=learning_rate,
+                                    momentum=momentum)
     else:
         raise ConfigurationError("Invalid optimizer. Valid options: 'adam', "
-                                 "'adagrad', 'adadelta', 'rmsprop', 'sgd'.")
+                                 "'adagrad', 'adadelta', 'rmsprop', 'sgd', 'sam'.")
 
     kwargs_str = ", ".join([f'{k}={v}' for k, v in kwargs.items()])
     logger.info("%s(weight_decay=%f, lr=%f%s)" % (

@@ -15,7 +15,7 @@ from joeynmt.initialization import initialize_model
 from joeynmt.embeddings import Embeddings
 from joeynmt.encoders import Encoder, RecurrentEncoder, TransformerEncoder
 from joeynmt.decoders import Decoder, RecurrentDecoder, TransformerDecoder
-from joeynmt.constants import PAD_TOKEN, EOS_TOKEN, BOS_TOKEN
+from joeynmt.constants import UNK_TOKEN, PAD_TOKEN, EOS_TOKEN, BOS_TOKEN
 from joeynmt.vocabulary import Vocabulary
 from joeynmt.helpers import ConfigurationError
 
@@ -52,6 +52,7 @@ class Model(nn.Module):
         self.decoder = decoder
         self.src_vocab = src_vocab # None if task == "s2t"
         self.trg_vocab = trg_vocab
+        self.unk_index = self.trg_vocab.stoi[UNK_TOKEN]
         self.bos_index = self.trg_vocab.stoi[BOS_TOKEN]
         self.pad_index = self.trg_vocab.stoi[PAD_TOKEN]
         self.eos_index = self.trg_vocab.stoi[EOS_TOKEN]

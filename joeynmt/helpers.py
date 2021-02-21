@@ -14,6 +14,8 @@ from typing import Optional, List
 import pathlib
 import numpy as np
 import pkg_resources
+import functools
+import operator
 
 import torch
 from torch import nn, Tensor
@@ -150,11 +152,17 @@ def log_data_info(train_data: Dataset, valid_data: Dataset, test_data: Dataset,
     :param trg_vocab:
     """
     logger = logging.getLogger(__name__)
-    logger.info(
-        "Data set sizes: \n\ttrain %10d,\n\t  dev %10d,\n\t test %10d",
-        len(train_data) if train_data is not None else 0,
-        len(valid_data) if valid_data is not None else 0,
-        len(test_data) if test_data is not None else 0)
+    if train_data is not None:
+        logger.info(f'train: {train_data}')
+    if valid_data is not None:
+        logger.info(f'  dev: {valid_data}')
+    if test_data is not None:
+        logger.info(f' test: {test_data}')
+    #logger.info(
+    #    "Data set sizes: \n\ttrain %10d,\n\t  dev %10d,\n\t test %10d",
+    #    len(train_data) if train_data is not None else 0,
+    #    len(valid_data) if valid_data is not None else 0,
+    #    len(test_data) if test_data is not None else 0)
 
     if train_data:
         src_sentence = "\n\t[SRC] " + " ".join(vars(train_data[0])['src']) if src_vocab else ""
@@ -187,11 +195,13 @@ def bpe_postprocess(string, bpe_type="subword-nmt") -> str:
     Post-processor for BPE output. Recombines BPE-split tokens.
 
     :param string:
-    :param bpe_type: one of {"sentencepiece", "subword-nmt"}
+    :param bpe_type: one of {"sentencepiece", "subword-nmt", "wordpiece"}
     :return: post-processed string
     """
     if bpe_type == "sentencepiece":
         ret = string.replace(" ", "").replace("▁", " ").strip()
+    elif bpe_type == "wordpiece":
+        ret = string.replace(" ##", " ").strip()
     elif bpe_type == "subword-nmt":
         ret = string.replace("@@ ", "").strip()
     else:
@@ -395,3 +405,51 @@ def pad(x, max_len, pad_index, dim=1):
     assert new_x.size(dim) == max_len, (x.size(), offset, new_x.size(), max_len)
     return new_x
 
+
+def flatten(array: List[List]) -> List:
+    return functools.reduce(operator.iconcat, array, [])
+
+#from fairseq
+def align_words_to_bpe(bpe_tokens: List[str], word_tokens: List[str],
+                       bpe_type="sentencepiece", start=1) -> List[List[int]]:
+    """
+    align BPE to word tokenization formats.
+
+    :params bpe_tokens: list of BPE tokens
+    :params word_tokens: list of word tokens
+    :return: mapping from *word_tokens* to corresponding *bpe_tokens*.
+    """
+
+    # remove whitespaces/delimiters
+    bpe_tokens = [bpe_postprocess(str(x), bpe_type=bpe_type) for x in bpe_tokens]
+    word_tokens = [bpe_postprocess(str(w), bpe_type=bpe_type) for w in word_tokens]
+    assert "".join(bpe_tokens) == "".join(word_tokens)
+
+    # create alignment from every word to a list of BPE tokens
+    words2bpe = []
+    bpe_toks = filter(lambda item: item[1] != "", enumerate(bpe_tokens, start=start))
+    j, bpe_tok = next(bpe_toks)
+    for word_tok in word_tokens:
+        bpe_indices = []
+        while True:
+            if word_tok.startswith(bpe_tok):
+                bpe_indices.append(j)
+                word_tok = word_tok[len(bpe_tok) :]
+                try:
+                    j, bpe_tok = next(bpe_toks)
+                except StopIteration:
+                    j, bpe_tok = None, None
+            elif bpe_tok.startswith(word_tok):
+                # word_tok spans multiple BPE tokens
+                bpe_indices.append(j)
+                bpe_tok = bpe_tok[len(word_tok) :]
+                word_tok = ""
+            else:
+                raise Exception('Cannot align "{}" and "{}"'.format(word_tok, bpe_tok))
+            if word_tok == "":
+                break
+        assert len(bpe_indices) > 0
+        words2bpe.append(bpe_indices)
+    assert len(words2bpe) == len(word_tokens)
+
+    return words2bpe

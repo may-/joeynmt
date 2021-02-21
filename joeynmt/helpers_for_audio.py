@@ -6,10 +6,16 @@ Collection of helper functions for audio processing
 import os
 import os.path
 import io
+import logging
 
 from collections import defaultdict
 import numpy as np
 from textgrid import TextGrid
+
+from joeynmt.constants import UNK_TOKEN, PAD_TOKEN, BOS_TOKEN, EOS_TOKEN
+
+
+logger = logging.getLogger(__name__)
 
 
 class SpeechInstance:
@@ -27,50 +33,48 @@ class SpeechInstance:
     def __len__(self):
         return self.n_frames
 
-    # from fairseq
-    def _is_npy_data(self, data: bytes) -> bool:
-        return data[0] == 147 and data[1] == 78
+# from fairseq
+def _is_npy_data(data: bytes) -> bool:
+    return data[0] == 147 and data[1] == 78
 
-    # from fairseq
-    def _get_features_from_zip(self, path, byte_offset, byte_size):
-        assert path.endswith(".zip")
-        with open(path, "rb") as f:
-            f.seek(byte_offset)
-            data = f.read(byte_size)
-        byte_features = io.BytesIO(data)
-        if self._is_npy_data(data):
-            features = np.load(byte_features)
+# from fairseq
+def _get_features_from_zip(path, byte_offset, byte_size):
+    assert path.endswith(".zip")
+    with open(path, "rb") as f:
+        f.seek(byte_offset)
+        data = f.read(byte_size)
+    byte_features = io.BytesIO(data)
+    if _is_npy_data(data):
+        features = np.load(byte_features)
+    else:
+        raise ValueError(f'Unknown file format for "{path}"')
+    return features
+
+# from fairseq
+def get_features(path):
+    """Get speech features from ZIP file
+       accessed via byte offset and length
+
+    :return: (np.ndarray) speech features in shape of (num_frames, num_freq)
+    """
+    _path, *extra = path.split(":")
+    if not os.path.exists(_path):
+        raise FileNotFoundError(f"File not found: {_path}")
+
+    if len(extra) == 0:
+        ext = os.path.splitext(os.path.basename(_path))[1]
+        if ext == ".npy":
+            features = np.load(_path)
         else:
-            raise ValueError(f'Unknown file format for "{path}"')
-        return features
-
-    # from fairseq
-    def get_features(self):
-        """Get speech features from ZIP file
-           accessed via byte offset and length
-
-        :return: (np.ndarray) speech features in shape of (num_frames, num_freq)
-        """
-        _path, *extra = self.path.split(":")
-        if not os.path.exists(_path):
-            raise FileNotFoundError(f"File not found: {_path}")
-
-        if len(extra) == 0:
-            ext = os.path.splitext(os.path.basename(_path))[1]
-            if ext == ".npy":
-                features = np.load(_path)
-            else:
-                raise ValueError(f"Invalid file type: {_path}")
-        elif len(extra) == 2:
-            extra = [int(i) for i in extra]
-            features = self._get_features_from_zip(
-                _path, extra[0], extra[1]
-            )
-        else:
-            raise ValueError(f"Invalid path: {self.path}")
-        assert abs(features.shape[0] - self.n_frames) <= 1, \
-            (features.shape[0] - self.n_frames, self.id)
-        return features
+            raise ValueError(f"Invalid file type: {_path}")
+    elif len(extra) == 2:
+        extra = [int(i) for i in extra]
+        features = _get_features_from_zip(
+            _path, extra[0], extra[1]
+        )
+    else:
+        raise ValueError(f"Invalid path: {path}")
+    return features
 
 
 def pad_features(batch, embed_size=80, max_len=None):
@@ -96,7 +100,8 @@ def pad_features(batch, embed_size=80, max_len=None):
 
     for i, b in enumerate(batch):
         # look up zip file
-        f = b.get_features()
+        f = get_features(b.path)
+        assert abs(f.shape[0] - b.n_frames) <= 1, (f.shape[0] - b.n_frames, b.id)
         length = min(f.shape[0], b.n_frames)
         lengths[i] = length
         features[i, :length, :] += f[:length, :]
@@ -166,3 +171,4 @@ def get_textgrid(textgrid_path, trg, frame_shift=100, return_phn=False):
             wrd2phn[k] = ' '.join([alignments['phones'][phn][-1] for phn in dic[j]])
 
         return alignments, wrd2phn
+

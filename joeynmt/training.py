@@ -21,13 +21,15 @@ from torch.utils.tensorboard import SummaryWriter
 
 from torchtext.data import Dataset
 
+from joeynmt.constants import UNK_TOKEN
 from joeynmt.model import build_model
 from joeynmt.batch import Batch, SpeechBatch
 from joeynmt.helpers import load_config, log_cfg, \
     store_attention_plots, load_checkpoint, make_model_dir, \
     make_logger, set_seed, symlink_update, delete_ckpt, \
     latest_checkpoint_update, ConfigurationError
-from joeynmt.data_augmentation import SpecAugment
+from joeynmt.data_augmentation import Sampler, SpecAugment, \
+    AlignedMasking, AudioDictAugment, MaskedLMAugment, SubSequencer
 from joeynmt.model import Model, _DataParallel
 from joeynmt.prediction import validate_on_data
 from joeynmt.loss import XentLoss, XentCTCLoss
@@ -78,8 +80,6 @@ class TrainManager:
         self.tb_writer = SummaryWriter(
             log_dir=os.path.join(self.model_dir, "tensorboard"))
 
-        self.save_latest_checkpoint = train_config.get("save_latest_ckpt", True)
-
         # model
         self.model = model
         self.model.log_parameters_list()
@@ -116,6 +116,7 @@ class TrainManager:
         # validation & early stopping
         self.validation_freq = train_config.get("validation_freq", 1000)
         self.log_valid_sents = train_config.get("print_valid_sents", [0, 1, 2])
+        self.save_latest_checkpoint = train_config.get("save_latest_ckpt", True)
         maxlen = train_config.get("keep_last_ckpts", 5)
         self.ckpt_queue = collections.deque(
             maxlen=maxlen if maxlen > 0 else None)
@@ -166,6 +167,13 @@ class TrainManager:
                                      "Valid options: 'word', 'bpe', 'char'.")
         test_config = config["testing"]
         self.bpe_type = test_config.get("bpe_type", "subword-nmt")
+        if self.bpe_type not in ["subword-nmt", "sentencepiece"]:
+            raise ConfigurationError("Invalid bpe type. Valid options: "
+                                     "'subword-nmt', 'sentencepiece'.")
+        self.level = config["data"]["level"]
+        if self.level not in ["word", "bpe", "char"]:
+            raise ConfigurationError("Invalid segmentation level. "
+                                     "Valid options: 'word', 'bpe', 'char'.")
         self.sacrebleu = {
             "remove_whitespace": True,
             "remove_punctuation": True,
@@ -207,13 +215,7 @@ class TrainManager:
         # per-device eval_batch_size = self.eval_batch_size // self.n_gpu
         self.eval_batch_type = train_config.get("eval_batch_type",
                                                 self.batch_type)
-        # SpecAugment
-        if self.task == "s2t":
-            self.specaugment = None
-            if "specaugment" in config["data"].keys():
-                self.specaugment = SpecAugment(**config["data"]["specaugment"])
-                logger.info(self.specaugment)
-
+        # gradient accumulation
         self.batch_multiplier = train_config.get("batch_multiplier", 1)
 
         # generation
@@ -239,12 +241,54 @@ class TrainManager:
             # opt level: one of {"O0", "O1", "O2", "O3"}
             # see https://nvidia.github.io/apex/amp.html#opt-levels
 
+        # data augmentation
+        if self.task == "s2t":
+            self.data_augmentation = config["data"].get("data_augmentation", "specaugment")
+            self.max_src_length = config["data"]["max_feat_length"]
+            self.max_trg_length = config["data"]["max_sent_length"]
+            self.specaugment = None
+            if "specaugment" in config["data"].keys():
+                self.specaugment = SpecAugment(**config["data"]["specaugment"])
+                logger.info(self.specaugment)
+
+            self.sampler = None
+            if "sampler" in config["data"].keys():
+                self.mask_sampler = Sampler(config["data"]["sampler"], unk_token=UNK_TOKEN)
+                logger.info(self.mask_sampler)
+
+            self.aligned_masking = None
+            if self.data_augmentation == "aligned_masking":
+                self.aligned_masking = AlignedMasking()
+                #logger.info(self.aligned_masking)
+
+            self.audio_dict = None
+            if self.data_augmentation in ["audio_dict_replacement", "aligned_audio_dict"] \
+                    and "audio_dict" in config["data"].keys():
+                self.audio_dict = AudioDictAugment(config["data"]["audio_dict"])
+                logger.info(self.audio_dict)
+
+            self.masked_lm = None
+            if self.data_augmentation in ["trg_replacement", "aligned_audio_dict"] \
+                    and "masked_language_model" in config["data"].keys():
+                self.masked_lm = MaskedLMAugment(config["data"]["masked_language_model"],
+                                                 config["data"]['lowercase'], self.model.trg_vocab.stoi,
+                                                 self.model.unk_index, self.model.bos_index,
+                                                 self.model.eos_index, self.device)
+                logger.info(self.masked_lm)
+
+            self.subsequencer = None
+            if "subsequence" in config["data"].keys():
+                self.subsequencer = SubSequencer(**config["data"]["subsequence"])
+                logger.info(self.subsequencer)
+
         # initialize training statistics
         self.stats = self.TrainStatistics(
             steps=0,
             is_min_lr=False,
             is_max_update=False,
             total_tokens=0,
+            total_seqs=0,
+            total_batches=0,
             best_ckpt_iter=0,
             best_ckpt_score=np.inf if self.minimize_metric else -np.inf,
             minimize_metric=self.minimize_metric)
@@ -304,8 +348,8 @@ class TrainManager:
         torch.save(state, model_path)
         symlink_target = f"{self.stats.steps}.ckpt"
         if new_best:
-            if self.ckpt_queue.maxlen is not None and \
-                    len(self.ckpt_queue) == self.ckpt_queue.maxlen:
+            if self.ckpt_queue.maxlen is not None \
+                    and len(self.ckpt_queue) == self.ckpt_queue.maxlen:
                 to_delete = self.ckpt_queue.popleft()  # delete oldest ckpt
                 delete_ckpt(to_delete)
 
@@ -377,6 +421,8 @@ class TrainManager:
         # restore counts
         self.stats.steps = model_checkpoint["steps"]
         self.stats.total_tokens = model_checkpoint["total_tokens"]
+        self.stats.total_seqs = model_checkpoint["total_seqs"] if "total_seqs" in model_checkpoint.keys() else 0
+        self.stats.total_batches = model_checkpoint["total_batches"] if "total_batches" in model_checkpoint.keys() else 0
 
         if not reset_best_ckpt:
             self.stats.best_ckpt_score = model_checkpoint["best_ckpt_score"]
@@ -474,10 +520,19 @@ class TrainManager:
                 # create a Batch object from torchtext batch
                 kwargs = {}
                 if self.task=="s2t":
+                    kwargs["steps"] = self.stats.steps
+                    kwargs["batch_count"] = i
                     kwargs["is_train"] = True
+                    kwargs["max_src_length"] = self.max_src_length
+                    kwargs["max_trg_length"] = self.max_trg_length
                     kwargs["specaugment"] = self.specaugment
-                batch = self.batch_class(batch, self.model.pad_index,
-                                         use_cuda=self.use_cuda, **kwargs)
+                    kwargs["sampler"] = self.mask_sampler
+                    kwargs["aligned_masking"] = self.aligned_masking
+                    kwargs["audio_dict"] = self.audio_dict
+                    kwargs["masked_lm"] = self.masked_lm
+                batch = self.batch_class(batch, pad_index=self.model.pad_index,
+                    bos_index=self.model.bos_index, eos_index=self.model.eos_index,
+                    use_cuda=self.use_cuda, **kwargs)
 
                 # get batch loss
                 loss_dict = self._train_step(batch)
@@ -562,8 +617,14 @@ class TrainManager:
                             'updates %d was reached.', self.max_updates)
                 break
 
-            logger.info('Epoch %3d: total training loss %.2f', epoch_no + 1,
-                        epoch_loss)
+            logger.info('Epoch %3d: total training loss %.2f, num updates: %6d, '
+                        'num instances: %6d, num tokens: %6d, num batches: %6d',
+                        epoch_no + 1, epoch_loss, self.stats.steps,
+                        self.stats.total_seqs, self.stats.total_tokens,
+                        self.stats.total_batches)
+
+            if self.masked_lm is not None:
+                self.masked_lm.reset_stats()
         else:
             logger.info('Training ended after %3d epochs.', epoch_no + 1)
         metric_name = self.eval_metrics[0] \
@@ -619,6 +680,8 @@ class TrainManager:
         if self.n_gpu > 1:
             norm_batch_loss = norm_batch_loss / self.n_gpu
             correct_tokens = correct_tokens / self.n_gpu
+            for l in  auxiliary_losses.keys():
+                auxiliary_losses[l] = auxiliary_losses[l] / self.n_gpu
 
         if self.batch_multiplier > 1:
             norm_batch_loss = norm_batch_loss / self.batch_multiplier
@@ -634,6 +697,8 @@ class TrainManager:
 
         # increment token counter
         self.stats.total_tokens += batch.ntokens
+        self.stats.total_seqs += batch.nseqs
+        self.stats.total_batches += 1
 
         ret = {'loss': norm_batch_loss.item(),
                'acc': (correct_tokens/batch.ntokens).item()}
@@ -651,7 +716,8 @@ class TrainManager:
                 batch_class=self.batch_class,
                 data=valid_data,
                 eval_metrics=self.eval_metrics,
-                level=self.level, model=self.model,
+                level=self.level,
+                model=self.model,
                 use_cuda=self.use_cuda,
                 max_output_length=self.max_output_length,
                 compute_loss=True,
@@ -851,6 +917,8 @@ class TrainManager:
                      is_min_lr: bool = False,
                      is_max_update: bool = False,
                      total_tokens: int = 0,
+                     total_batches: int = 0,
+                     total_seqs: int = 0,
                      best_ckpt_iter: int = 0,
                      best_ckpt_score: float = np.inf,
                      minimize_metric: bool = True) -> None:
@@ -864,6 +932,8 @@ class TrainManager:
             self.is_max_update = is_max_update
             # number of total tokens seen so far
             self.total_tokens = total_tokens
+            self.total_batches = total_batches
+            self.total_seqs = total_seqs
             # store iteration point of best ckpt
             self.best_ckpt_iter = best_ckpt_iter
             # initial values for best scores

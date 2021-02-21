@@ -17,6 +17,7 @@ from torchtext.data import Dataset, Iterator, Field
 
 from joeynmt.constants import UNK_TOKEN, EOS_TOKEN, BOS_TOKEN, PAD_TOKEN
 from joeynmt.vocabulary import build_vocab, Vocabulary
+from joeynmt.helpers import align_words_to_bpe, log_data_info, ConfigurationError
 from joeynmt.helpers_for_audio import SpeechInstance, pad_features, get_textgrid
 
 
@@ -67,6 +68,9 @@ def load_data(data_cfg: dict, datasets: list = None)\
         raise ValueError('Please specify at least one data source path.')
 
     level = data_cfg["level"]
+    if level not in ["word", "bpe", "char"]:
+        raise ConfigurationError("Invalid segmentation level. "
+                                 "Valid options: 'word', 'bpe', 'char'.")
     lowercase = data_cfg["lowercase"]
     max_sent_length = data_cfg["max_sent_length"]
     if task == "s2t":
@@ -89,6 +93,7 @@ def load_data(data_cfg: dict, datasets: list = None)\
     textgrid = data_cfg.get("textgrid", False)
     if textgrid:
         textgrid_field = data.RawField(is_target=False)
+        word2bpe_field = data.RawField(is_target=False)
 
     trg_field = data.Field(init_token=BOS_TOKEN, eos_token=EOS_TOKEN,
                            pad_token=PAD_TOKEN, tokenize=tok_fun,
@@ -109,8 +114,8 @@ def load_data(data_cfg: dict, datasets: list = None)\
             fields = [('src', src_field), ('trg', trg_field)]
             kwargs = {}
             if textgrid:
-                kwargs['frameshift'] = data_cfg.get("frame_shift", 100)
-                fields.append(('textgrid', textgrid_field))
+                kwargs['frame_shift'] = data_cfg.get("frame_shift", 100)
+                fields.extend([('textgrid', textgrid_field), ('word2bpe', word2bpe_field)])
             train_data = SpeechDataset(
                 root_path=root_path, tsv_file=train_path, fields=fields,
                 filter_pred=lambda x: len(vars(x)['src']) <= max_feat_length
@@ -355,20 +360,29 @@ class SpeechDataset(TranslationDataset):
                 quoting=csv.QUOTE_NONE,
             )
             for i, dic in enumerate(reader):
-                assert 'src' in dic.keys() and 'n_frames' in dic.keys()
-                example = dict()
-                _id = dic['id'] if 'id' in dic.keys() else i
-                example['src'] = SpeechInstance(os.path.join(root_path, dic['src']),
-                                                int(dic['n_frames']), str(_id))
-                if 'trg' in headers:
-                    example['trg'] = dic['trg']
-                if 'textgrid' in headers and 'trg_text' in dic.keys():
-                    textgrid_path = os.path.join(root_path, dic['textgrid'])
-                    example['textgrid'] = get_textgrid(textgrid_path, dic['trg_text'].lower(),
-                                                       frame_shift=frame_shift)
-                examples.append(data.Example.fromlist([example[h] for h in headers], fields))
+                try:
+                    assert 'src' in dic.keys() and 'n_frames' in dic.keys()
+                    example = dict()
+                    _id = dic['id'] if 'id' in dic.keys() else i
+                    example['src'] = SpeechInstance(os.path.join(root_path, dic['src']),
+                                                    int(dic['n_frames']), str(_id))
+                    if 'trg' in headers:
+                        example['trg'] = dic['trg']
+                    if 'textgrid' in headers and 'trg_text' in dic.keys():
+                        textgrid_path = os.path.join(root_path, dic['textgrid'])
+                        words = dic['trg_text'].lower()
+                        example['textgrid'] = get_textgrid(textgrid_path, words, frame_shift=frame_shift)
+                        example['word2bpe'] = align_words_to_bpe(dic['trg'].split(), words.split(), start=1)
+                    examples.append(data.Example.fromlist([example[h] for h in headers], fields))
+                except Exception as e:
+                    logger.warning(f'skip: {dic} ({e})')
 
         assert len(examples) > 0
 
         self.is_train = is_train
         super(TranslationDataset, self).__init__(examples, fields, **kwargs)
+
+    def __repr__(self):
+        return (self.__class__.__name__
+                + "(fields=[" + ", ".join([f for f in self.fields.keys()]) + "], "
+                + f"is_train={self.is_train}, len(examples)={len(self.examples)}")

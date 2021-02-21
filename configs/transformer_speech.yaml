@@ -17,12 +17,34 @@ data: # specify your data here
     trg_voc_limit: 10000            # trg vocabulary only includes this many most frequent tokens, default: unlimited
     #src_vocab: "models/librispeech/src_vocab.txt"  # if specified, load a vocabulary from this file
     trg_vocab: "models/librispeech/trg_vocab.txt"  # one token per line, line number is index
+    data_augmentation: "aligned_audio_dict"         # {"specaugment": specaugment only,
+                                                    #  "trg_replacement": specaugment + trg_replacement,
+                                                    #  "aligned_masking": (freq_)specaugment + (time_)aligned_src_masking + trg replacement,
+                                                    #  "audio_dict_replacement": specaugment + audio_dict,
+                                                    #  "aligned_audio_dict": specaugment + audio_dict + aligned_trg_replacement}
     specaugment:
         freq_mask_n: 2
         freq_mask_f: 27
         time_mask_n: 2
         time_mask_t: 40
         time_mask_p: 1.0
+    sampler:
+        sample_type: "least-freq"   # {'random', 'least-freq'}
+        sample_ratio: 0.2           # 20% of words in an utterance will be masked
+        sample_max_len: 10          # max 10 words in an utterance will be masked
+        min_trg_len: 10             # utterance at least of length 10 will be masked
+        token_sample_prob: 0.5      # coin flip prob per token
+        instance_sample_prob: 0.5   # coin flip prob per utterance
+        freq_dict_path: "/scratch5t/ohta/LibriSpeech/word_freq_dict.tsv"
+    audio_dict:
+        lookup: "word"              # {"word", "phoneme"} (don't change this for now...)
+        splits: "train-clean-100"   # splits (comma-separated)
+        threshold: 3
+        audio_dict_path: "/scratch5t/ohta/LibriSpeech/audio_dict_all.tsv"
+    masked_language_model:
+        language_model_path: "/scratch5t/ohta/LibriSpeech/roberta.base"
+        sentencepiece_model_file: "/scratch5t/ohta/LibriSpeech/train-clean-100_spm5000.model"
+        stop_token_file: "/scratch5t/ohta/LibriSpeech/stop_tokens.json"
 
 testing:                            # specify which inference algorithm to use for testing (for validation it's always greedy decoding)
     beam_size: 10                    # size of the beam for beam search
@@ -69,8 +91,8 @@ training:                           # specify training details here
     print_valid_sents: [0, 1, 2]    # print this many validation sentences during each validation run, default: [0, 1, 2]
     keep_last_ckpts: 3              # keep this many of the latest checkpoints, if -1: all of them, default: 5
     label_smoothing: 0.1            # label smoothing: reference tokens will have 1-label_smoothing probability instead of 1, rest of probability mass is uniformly distributed over the rest of the vocabulary, default: 0.0 (off)
-    loss: "crossentropy-ctc"        # loss function; one of {"crossentropy", "crossentropy-ctc"}
-    ctc_weight: 0.1                 # interpolation weight (used in "crossentropy-ctc" loss)
+    loss: "crossentropy-ctc"       # loss function; one of {"crossentropy", "crossentropy-ctc"}
+    ctc_weight: 0.3                 # interpolation weight (used in "crossentropy-ctc" loss)
 
 model:                              # specify your model architecture here
     initializer: "xavier"           # initializer for all trainable weights (xavier, zeros, normal, uniform)

@@ -5,8 +5,8 @@ This modules holds methods for generating predictions from a model.
 import os
 import sys
 from typing import List, Optional
-import logging
 from collections import defaultdict
+import logging
 
 import numpy as np
 
@@ -57,6 +57,7 @@ def validate_on_data(model: Model, data: Dataset,
     :param level: segmentation level, one of "char", "bpe", "word"
     :param eval_metrics: list of evaluation metric, e.g. ["bleu"]
     :param n_gpu: number of GPUs
+    :param task: task name
     :param compute_loss: whether to computes a scalar loss
         for given inputs and targets
     :param beam_size: beam size for validation.
@@ -80,6 +81,7 @@ def validate_on_data(model: Model, data: Dataset,
         - valid_attention_scores: attention scores for validation hypotheses
     """
     assert batch_size >= n_gpu, "batch_size must be bigger than n_gpu."
+
     if sacrebleu is None:   # assign default value
         sacrebleu = {
             "remove_whitespace": True,
@@ -96,7 +98,9 @@ def validate_on_data(model: Model, data: Dataset,
         dataset=data, batch_size=batch_size, batch_type=batch_type,
         shuffle=False, train=False)
     valid_sources_raw = data.src
-    pad_index = model.trg_vocab.stoi[PAD_TOKEN]
+    pad_index = model.pad_index
+    bos_index = model.bos_index
+    eos_index = model.eos_index
     # disable dropout
     model.eval()
     # don't track gradients during validation
@@ -112,8 +116,8 @@ def validate_on_data(model: Model, data: Dataset,
             # run as during training to get validation loss (e.g. xent)
 
             kwargs = {"is_train": False} if task == "s2t" else {}
-            batch = batch_class(valid_batch, pad_index, use_cuda=use_cuda,
-                                **kwargs)
+            batch = batch_class(valid_batch, pad_index, bos_index, eos_index,
+                                use_cuda=use_cuda, **kwargs)
             # sort batch now by src length and keep track of order
             sort_reverse_index = batch.sort_by_src_length()
 
@@ -291,8 +295,7 @@ def parse_test_args(cfg, mode="test"):
 
     return batch_size, batch_type, use_cuda, device, n_gpu, level, \
            eval_metrics, max_output_length, beam_size, beam_alpha, \
-           postprocess, bpe_type, sacrebleu, decoding_description, \
-           tokenizer_info
+           postprocess, bpe_type, sacrebleu, decoding_description, tokenizer_info
 
 
 # pylint: disable-msg=logging-too-many-args,too-many-branches
@@ -339,9 +342,8 @@ def test(cfg_file,
 
     # parse test args
     batch_size, batch_type, use_cuda, device, n_gpu, level, eval_metrics, \
-        max_output_length, beam_size, beam_alpha, postprocess, \
-        bpe_type, sacrebleu, decoding_description, tokenizer_info \
-        = parse_test_args(cfg, mode="test")
+    max_output_length, beam_size, beam_alpha, postprocess, bpe_type, \
+    sacrebleu, decoding_description, tokenizer_info = parse_test_args(cfg, mode="test")
 
     # load model state from disk
     model_checkpoint = load_checkpoint(ckpt, use_cuda=use_cuda)
@@ -508,11 +510,9 @@ def translate(cfg_file: str,
     level = data_cfg["level"]
     lowercase = data_cfg["lowercase"]
 
-    tok_fun = lambda s: list(s) if level == "char" else s.split()
-
     if task == "MT":
         src_field = Field(init_token=None, eos_token=EOS_TOKEN,
-                          pad_token=PAD_TOKEN, tokenize=tok_fun,
+                          pad_token=PAD_TOKEN,
                           batch_first=True, lower=lowercase,
                           unk_token=UNK_TOKEN,
                           include_lengths=True)

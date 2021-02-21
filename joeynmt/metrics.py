@@ -73,7 +73,7 @@ def sequence_accuracy(hypotheses, references):
     return (correct_sequences / len(hypotheses))*100 if hypotheses else 0.0
 
 
-def wer(hypotheses, references, tokenizer=None, avg="macro"):
+def wer(hypotheses, references, tokenizer=None):
     """
     Compute word error rate
 
@@ -84,19 +84,22 @@ def wer(hypotheses, references, tokenizer=None, avg="macro"):
     """
     numerator = 0.0
     denominator = 0.0
-    if avg == "micro":    # micro average
-        for hyp, ref in zip(hypotheses, references):
-            wer = editdistance.eval(tokenizer(hyp), tokenizer(ref)) / len(tokenizer(ref))
-            numerator += max(wer, 1.0) # can be `wer > 1` if `len(hyp) > len(ref)`
-            denominator += 1.0
-    elif avg == "macro":  # macro average
-        for hyp, ref in zip(hypotheses, references):
-            numerator += editdistance.eval(tokenizer(hyp), tokenizer(ref))
-            denominator += len(tokenizer(ref))
+
+    # sentence-level wer
+    #for hyp, ref in zip(hypotheses, references):
+    #    wer = editdistance.eval(tokenizer(hyp),
+    #                            tokenizer(ref)) / len(tokenizer(ref))
+    #    numerator += max(wer, 1.0) # can be `wer > 1` if `len(hyp) > len(ref)`
+    #    denominator += 1.0
+    # corpus-level wer
+    for hyp, ref in zip(hypotheses, references):
+        numerator += editdistance.eval(tokenizer(hyp), tokenizer(ref))
+        denominator += len(tokenizer(ref))
+
     return (numerator / denominator) * 100 if denominator else 0.0
 
 # from fairseq
-class EvaluationTokenizer(object):
+class EvaluationTokenizer:
     """A generic evaluation-time tokenizer, which leverages built-in tokenizers
     in sacreBLEU (https://github.com/mjpost/sacrebleu). It additionally provides
     lowercasing, punctuation removal and character tokenization, which are
@@ -152,4 +155,3 @@ class EvaluationTokenizer(object):
             tokenized = tokenized.lower()
 
         return tokenized
-

@@ -33,6 +33,7 @@ from joeynmt.data import load_data, make_data_iter
 from joeynmt.builders import build_optimizer, build_scheduler, \
     build_gradient_clipper
 from joeynmt.prediction import test
+from joeynmt.metrics import EvaluationTokenizer
 
 # for fp16 training
 try:
@@ -49,7 +50,7 @@ logger = logging.getLogger(__name__)
 class TrainManager:
     """ Manages training loop, validations, learning rate scheduling
     and early stopping."""
-
+    # pylint: disable=too-many-branches,too-many-statements
     def __init__(self, model: Model, config: dict,
                  batch_class: Batch = Batch) -> None:
         """
@@ -101,16 +102,21 @@ class TrainManager:
         self.ckpt_queue = collections.deque(
             maxlen=maxlen if maxlen > 0 else None)
         metrics = train_config.get("eval_metrics", "").split(",")
-        self.eval_metrics = [s.strip().lower() for s in metrics if len(s.strip()) > 0]
+        self.eval_metrics = [s.strip().lower() for s in metrics
+                             if len(s.strip()) > 0]
         #backward compatibility
-        if len(self.eval_metrics) == 0 and "eval_metric" in train_config.keys():
-            self.eval_metrics = [train_config.get("eval_metric", "bleu").strip().lower()]
+        if len(self.eval_metrics) == 0 \
+                and "eval_metric" in train_config.keys():
+            self.eval_metrics = [train_config.get("eval_metric",
+                                                  "bleu").strip().lower()]
         assert len(self.eval_metrics) > 0
         for eval_metric in self.eval_metrics:
-            if eval_metric not in ['bleu', 'chrf', 'token_accuracy', 'sequence_accuracy', 'wer']:
+            if eval_metric not in ['bleu', 'chrf', 'token_accuracy',
+                                   'sequence_accuracy', 'wer']:
                 raise ConfigurationError("Invalid setting for 'eval_metric', "
                                          "valid options: 'bleu', 'chrf', "
-                                         "'token_accuracy', 'sequence_accuracy', 'wer'.")
+                                         "'token_accuracy', "
+                                         "'sequence_accuracy', 'wer'.")
         self.early_stopping_metric = train_config.get("early_stopping_metric",
                                                       "eval_metric")
 
@@ -136,11 +142,17 @@ class TrainManager:
                 "valid options: 'loss', 'ppl', 'acc', 'eval_metric'.")
 
         # eval options
+        self.level = config["data"]["level"]
+        if self.level not in ["word", "bpe", "char"]:
+            raise ConfigurationError("Invalid segmentation level. "
+                                     "Valid options: 'word', 'bpe', 'char'.")
         test_config = config["testing"]
         self.bpe_type = test_config.get("bpe_type", "subword-nmt")
         self.sacrebleu = {
-            "remove_whitespace": True, "remove_punctuation": True, "tokenize": "13a",
-            "tok_fun": lambda s: list(s) if config["data"]["level"]=="char" else s.split()}
+            "remove_whitespace": True,
+            "remove_punctuation": True,
+            "tokenize": "13a",
+            "tok_fun": lambda s: list(s) if self.level=="char" else s.split()}
         if "sacrebleu" in config["testing"].keys():
             self.sacrebleu["remove_whitespace"] = test_config["sacrebleu"] \
                 .get("remove_whitespace", True)
@@ -150,10 +162,10 @@ class TrainManager:
                 .get("tokenize", "13a")
         if "wer" in self.eval_metrics:
             eval_tokenizer = EvaluationTokenizer(
-                tokenize=self.sacrebleu["tokenize"], #["none", "13a", "intl", "zh", "ja-mecab"]
+                tokenize=self.sacrebleu["tokenize"],
                 lowercase=config["data"].get("lowercase", False),
                 remove_punctuation=self.sacrebleu["tokenize"],
-                level=config["data"]["level"])
+                level=self.level)
             self.sacrebleu["tok_fun"] = eval_tokenizer.tokenize
 
         # learning rate scheduling
@@ -164,10 +176,6 @@ class TrainManager:
             hidden_size=config["model"]["encoder"]["hidden_size"])
 
         # data & batch handling
-        self.level = config["data"]["level"]
-        if self.level not in ["word", "bpe", "char"]:
-            raise ConfigurationError("Invalid segmentation level. "
-                                     "Valid options: 'word', 'bpe', 'char'.")
         self.shuffle = train_config.get("shuffle", True)
         self.epochs = train_config["epochs"]
         self.max_updates = train_config.get("updates", np.inf)
@@ -473,7 +481,8 @@ class TrainManager:
                     # log learning progress
                     if self.stats.steps % self.logging_freq == 0:
                         self.tb_writer.add_scalar("learning_rate/learning_rate",
-                            self.optimizer.param_groups[0]["lr"], self.stats.steps)
+                            self.optimizer.param_groups[0]["lr"],
+                            self.stats.steps)
                         self.tb_writer.add_scalar("train/train_batch_loss",
                                                   batch_loss, self.stats.steps)
                         self.tb_writer.add_scalar("train/train_batch_acc",
@@ -503,15 +512,15 @@ class TrainManager:
                 if self.stats.is_min_lr or self.stats.is_max_update:
                     break
 
+            # pylint: disable=no-else-break
             if self.stats.is_min_lr:
                 logger.info(
                     'Training ended since minimum lr %f was reached.',
                     self.learning_rate_min)
                 break
             elif self.stats.is_max_update:
-                logger.info(
-                    'Training ended since maximum num. of updates %d was reached.',
-                    self.max_updates)
+                logger.info('Training ended since maximum num. of '
+                            'updates %d was reached.', self.max_updates)
                 break
 
             logger.info('Epoch %3d: total training loss %.2f', epoch_no + 1,
@@ -606,7 +615,8 @@ class TrainManager:
             "valid/valid_loss", valid_loss, self.stats.steps)
         for eval_metric in self.eval_metrics:
             self.tb_writer.add_scalar(
-                f"valid/valid_{eval_metric}", valid_scores[eval_metric], self.stats.steps)
+                f"valid/valid_{eval_metric}", valid_scores[eval_metric],
+                self.stats.steps)
         self.tb_writer.add_scalar(
             "valid/valid_ppl", valid_ppl, self.stats.steps)
         self.tb_writer.add_scalar(
@@ -630,7 +640,9 @@ class TrainManager:
             self.stats.best_ckpt_score = ckpt_score
             self.stats.best_ckpt_iter = self.stats.steps
             logger.info('Hooray! New best validation result [%s]!',
-                self.eval_metrics[0] if (self.early_stopping_metric == 'eval_metric') else self.early_stopping_metric)
+                self.eval_metrics[0] \
+                if (self.early_stopping_metric == 'eval_metric') \
+                else self.early_stopping_metric)
             new_best = True
             self._save_checkpoint(new_best)
         elif self.save_latest_checkpoint:
@@ -670,8 +682,8 @@ class TrainManager:
                                   targets=valid_hypotheses_raw,
                                   sources=[s for s in valid_data.src],
                                   indices=self.log_valid_sents,
-                                  output_prefix=os.path.join(self.model_dir,
-                                                             f"att.{self.stats.steps}"),
+                                  output_prefix=os.path.join(
+                                      self.model_dir,f"att.{self.stats.steps}"),
                                   tb_writer=self.tb_writer,
                                   steps=self.stats.steps)
 
@@ -706,7 +718,8 @@ class TrainManager:
         with open(self.valid_report_file, 'a') as opened_file:
             score_str = ""
             for eval_metric in eval_metrics:
-                score_str += "{}: {:.5f}\t".format(eval_metric, valid_scores[eval_metric])
+                score_str += "{}: {:.5f}\t".format(eval_metric,
+                                                   valid_scores[eval_metric])
             opened_file.write(
                 "Steps: {}\tLoss: {:.5f}\tPPL: {:.5f}\tAcc: {:.5f}\t"
                 "{}LR: {:.8f}\t{}\n".format(

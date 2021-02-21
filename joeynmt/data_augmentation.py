@@ -287,11 +287,13 @@ class AudioDictAugment(object):
         self.audio_dict_threshold = audio_dict_cfg.get('threshold', 3)
         self.audio_dict = self.audio_dict[self.audio_dict['count'] > self.audio_dict_threshold]
 
+        self.mask_when_no_hit = audio_dict_cfg.get('mask_when_no_hit', False)
+
         self.bpe_type = 'sentencepiece' #audio_dict_cfg.get('bpe_type', 'sentencepiece')
         self.hit_count = 0
-        self.word_count = 0
+        self.query_count = 0
+        self.seg_count = 0
         self.sent_count = 0
-
 
     def __call__(self, x: np.ndarray, positions: Dict[int, str],
                  textgrids: List[List], word_cutoff: Tuple[int, int] = None) \
@@ -309,7 +311,7 @@ class AudioDictAugment(object):
 
         x_new = []
         align_new = []
-        flag = False # you need this flag because of in-sentence silent token
+        edit_flag = False # you need this flag because of in-sentence silent token
 
         ####          [[start, end, word, word_orig]]  pos
         # textgrids = [[0, 8, ''],                      -   # empty surface for silent token
@@ -327,12 +329,12 @@ class AudioDictAugment(object):
 
         pos = -1
         start = 0
-        word_count = 0
+        query_count = 0
         hit_count = 0
         for align in textgrids:
-            if len(align[-1]) > 0:  # empty surface = silent
-                pos += 1            # increment only when non-empty
-            else:
+            if len(align[-1]) > 0:  # only when non-empty
+                pos += 1            # increment
+            else:                   # empty surface = silent
                 x_new.append(x[align[0]:align[1], :])
                 l = align[1] - align[0] + 1
                 align_new.append([start, start+l])
@@ -340,31 +342,44 @@ class AudioDictAugment(object):
                 continue
 
             if pos in positions.keys():
-                flag = True # enter in edit mode
+                edit_flag = True # enter in edit mode
 
-            if flag:
+            if edit_flag:
                 surface = bpe_postprocess(positions[pos].replace(' ', '▁'), bpe_type=self.bpe_type)
+                words = surface.split() # 'surface' can consist of multiple words!
                 l = 0
-                for word in surface.split(): # 'surface' can consist of multiple words!
+                hit_flag = True
+                x_new_partial = []
+                for word in words:
                     #print('word', word.upper())
                     filtered = self.audio_dict[self.audio_dict[self.lookup] == word.upper()]
-                    word_count += 1
+                    query_count += 1
                     if len(filtered) < self.audio_dict_threshold:
-                        #x_new.append(x[align[0]:align[1], :])  # pass through
-                        # mask features
-                        f = np.full((align[1] - align[0] + 1, n_frames), x.mean(), dtype=x.dtype)
-                        hit_count += 1
+                        hit_flag = False
+                        break
                     else:   # if found:
                         sampled = filtered.sample(n=1).iloc[0]  # sample one entry from dict
                         f = get_features(os.path.join(self.audio_dict_root, sampled.audio))
                         f = f[sampled.start:sampled.end, :]
                         assert f.shape[0] == (sampled.n_frames - 1)
-                    x_new.append(f)
-                    l += f.shape[0]
+                        hit_count += 1
+                        x_new_partial.append(f)
+                        l += f.shape[0]
 
-                flag = False # leave edit mode
+                if hit_flag:
+                    assert len(x_new_partial) == len(words) and l > 0
+                    x_new.extend(x_new_partial)
+                else:
+                    l = align[1] - align[0] + 1
+                    if self.mask_when_no_hit:   # mask features
+                        f = np.full((l, n_frames), x.mean(), dtype=x.dtype)
+                    else:                       # pass through
+                        f = x[align[1]:align[0], :]
+                    x_new.append(f)
                 align_new.append([start, start+l])
                 start += l
+
+                edit_flag = False # leave edit mode
 
             else:
                 x_new.append(x[align[0]:align[1], :])
@@ -373,13 +388,14 @@ class AudioDictAugment(object):
                 start += l
                 continue
 
+        if query_count > 0:
+            self.sent_count += 1
+            self.seg_count += len(x_new)
+            self.query_count += query_count
+            self.hit_count += hit_count
+
         augmented = np.concatenate(x_new)
         del x_new
-
-        if word_count > 0:
-            self.sent_count += 1
-            self.word_count += word_count
-            self.hit_count += hit_count
 
         if word_cutoff is not None:
             word_start, word_end = word_cutoff
@@ -393,12 +409,14 @@ class AudioDictAugment(object):
         return augmented
 
     def reset_stats(self):
-        logger.info(f"hit rate: {self.hit_count/self.word_count}, "
+        logger.info(f"hit rate: {self.hit_count/self.query_count}, "
                     f"(hit count: {self.hit_count}, "
-                    f"word count: {self.word_count}, "
+                    f"query count: {self.query_count}, "
+                    f"segment count: {self.seg_count}, "
                     f"utterance count: {self.sent_count})")
         self.hit_count = 0
-        self.word_count = 0
+        self.query_count = 0
+        self.seg_count = 0
         self.sent_count = 0
 
     def __repr__(self):
@@ -406,7 +424,8 @@ class AudioDictAugment(object):
                 + f"(lookup='{self.lookup}', "
                 + f"splits='{self.splits}', "
                 + f"threshold={self.audio_dict_threshold}, "
-                + f"len(audio_dict)={len(self.audio_dict)})")
+                + f"len(audio_dict)={len(self.audio_dict)}, "
+                + f"mask_when_no_hit={self.mask_when_no_hit})")
 
 
 class MaskedLMAugment(object):
@@ -488,13 +507,16 @@ class MaskedLMAugment(object):
         )
         return tokens
 
-    def __call__(self, batch_positions, batch_textgrids) -> List[Dict[int, str]]:
+    def __call__(self, batch_positions, batch_textgrids, steps=0) -> List[Dict[int, str]]:
         """
         language model inference in batch level
         :param batch_positions:
         :param batch_textgrids:
         :return:
         """
+        if sum([1 if len(p) > 0 else 0 for p in batch_positions]) == 0:
+            return batch_positions
+
         batch_size = len(batch_positions)
         assert batch_size == len(batch_textgrids)
         input_ids = torch.ones((batch_size, self.max_length), dtype=torch.long)
@@ -528,11 +550,20 @@ class MaskedLMAugment(object):
 
         mask = (input_ids == self.roberta.task.mask_idx)
         with torch.no_grad():
-            features, extra = self.roberta.model(
-                input_ids,
-                features_only=False,
-                return_all_hiddens=False,
-            )
+            try:
+                features, extra = self.roberta.model(
+                    input_ids,
+                    features_only=False,
+                    return_all_hiddens=False,
+                )
+            except Exception as e:
+                logger.debug(f"Error at {steps}: {e}")
+                #if steps > 0:
+                #    obj = {"input_ids": input_ids,
+                #           "positions": batch_positions,
+                #           "textgrids": batch_textgrids}
+                #    torch.save(obj, os.path.join("/scratch5t/ohta/output/tmp2", f"error_{steps}.pt"))
+                return batch_positions
 
         f = features.detach().clone().cpu()
         f[:, :, self.stop_token_list] = -np.inf # prevent to generate stop tokens

@@ -14,3 +14,7 @@ pylint
 six==1.12
 wrapt==1.11.1
 editdistance
+textgrid
+pandas
+scipy
+fairseq

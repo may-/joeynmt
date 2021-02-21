@@ -370,7 +370,7 @@ def test(cfg_file,
     logger.info(model)
     # load model parameters
     model.load_state_dict(model_checkpoint["model_state"])
-    logger.info("Load model_state from %s.", ckpt)
+    logger.info("Loading model from %s", ckpt)
 
     if use_cuda:
         model.to(device)
@@ -489,6 +489,7 @@ def translate(cfg_file: str,
     cfg = load_config(cfg_file)
     model_dir = cfg["training"]["model_dir"]
     task = cfg["data"].get("task", "MT")
+    assert task == "MT", "Interactive mode is supported only for MT task. Abort."
 
     _ = make_logger(model_dir, mode="translate")
     # version string returned
@@ -529,7 +530,7 @@ def translate(cfg_file: str,
     # build model and load parameters into it
     model = build_model(cfg["model"], src_vocab=src_vocab, trg_vocab=trg_vocab)
     model.load_state_dict(model_checkpoint["model_state"])
-    logger.info("Load model_state from %s.", ckpt)
+    logger.info("Loading model from %s", ckpt)
 
     if use_cuda:
         model.to(device)
@@ -573,4 +574,4 @@ def translate(cfg_file: str,
                     print("\nBye.")
                     break
         else:
-            raise Exception("interactive mode is not supported for s2t.")
+            raise Exception("Interactive mode is not supported for s2t.")

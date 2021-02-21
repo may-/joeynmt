@@ -2,7 +2,7 @@ name: "librispeech"
 
 data: # specify your data here
     task: "s2t"                     # task, either "MT" for machine translation, or "s2t" for speech-to-text
-    root_path: "~/LibriSpeech/"     # root_path
+    root_path: "/scratch5t/ohta/LibriSpeech/"     # root_path
     train: "train-clean-100-sp_joey"            # training data
     dev: "dev-clean-sp_joey"                    # development data for validation
     test: "test-clean-sp_joey"                  # test data for testing final model; optional
@@ -14,10 +14,10 @@ data: # specify your data here
     #src_voc_min_freq: 1            # src minimum frequency for a token to become part of the vocabulary
     #src_voc_limit: 5000            # src vocabulary only includes this many most frequent tokens, default: unlimited
     trg_voc_min_freq: 1             # trg minimum frequency for a token to become part of the vocabulary
-    trg_voc_limit: 10000            # trg vocabulary only includes this many most frequent tokens, default: unlimited
+    trg_voc_limit: 5000            # trg vocabulary only includes this many most frequent tokens, default: unlimited
     #src_vocab: "models/librispeech/src_vocab.txt"  # if specified, load a vocabulary from this file
-    trg_vocab: "models/librispeech/trg_vocab.txt"  # one token per line, line number is index
-    data_augmentation: "aligned_audio_dict"         # {"specaugment": specaugment only,
+    #trg_vocab: "models/librispeech/trg_vocab.txt"  # one token per line, line number is index
+    data_augmentation: "specaugment"         # {"specaugment": specaugment only,
                                                     #  "trg_replacement": specaugment + trg_replacement,
                                                     #  "aligned_masking": (freq_)specaugment + (time_)aligned_src_masking + trg replacement,
                                                     #  "audio_dict_replacement": specaugment + audio_dict,
@@ -28,23 +28,30 @@ data: # specify your data here
         time_mask_n: 2
         time_mask_t: 40
         time_mask_p: 1.0
-    sampler:
-        sample_type: "least-freq"   # {'random', 'least-freq'}
-        sample_ratio: 0.2           # 20% of words in an utterance will be masked
-        sample_max_len: 10          # max 10 words in an utterance will be masked
-        min_trg_len: 10             # utterance at least of length 10 will be masked
-        token_sample_prob: 0.5      # coin flip prob per token
-        instance_sample_prob: 0.5   # coin flip prob per utterance
-        freq_dict_path: "/scratch5t/ohta/LibriSpeech/word_freq_dict.tsv"
-    audio_dict:
-        lookup: "word"              # {"word", "phoneme"} (don't change this for now...)
-        splits: "train-clean-100"   # splits (comma-separated)
-        threshold: 3
-        audio_dict_path: "/scratch5t/ohta/LibriSpeech/audio_dict_all.tsv"
-    masked_language_model:
-        language_model_path: "/scratch5t/ohta/LibriSpeech/roberta.base"
-        sentencepiece_model_file: "/scratch5t/ohta/LibriSpeech/train-clean-100_spm5000.model"
-        stop_token_file: "/scratch5t/ohta/LibriSpeech/stop_tokens.json"
+    #sampler:
+    #    sample_type: "least-freq"   # {'random', 'least-freq'}
+    #    sample_ratio: 0.2           # 20% of words in an utterance will be masked
+    #    sample_max_len: 10          # max 10 words in an utterance will be masked
+    #    min_trg_len: 10             # utterance at least of length 10 will be masked
+    #    token_sample_prob: 0.5      # coin flip prob per token
+    #    instance_sample_prob: 0.5   # coin flip prob per utterance
+    #    freq_dict_path: "/scratch5t/ohta/LibriSpeech/word_freq_dict.tsv"
+    #audio_dict:
+    #    lookup: "word"              # {"word", "phoneme"} (don't change this for now...)
+    #    splits: "train-clean-100"   # splits (comma-separated)
+    #    threshold: 3
+    #    audio_dict_path: "/scratch5t/ohta/LibriSpeech/audio_dict_all.tsv"
+    #masked_language_model:
+    #    language_model_path: "/scratch5t/ohta/LibriSpeech/roberta.base"
+    #    sentencepiece_model_file: "/scratch5t/ohta/LibriSpeech/train-clean-100_spm5000.model"
+    #    stop_token_file: "/scratch5t/ohta/LibriSpeech/stop_tokens.json"
+    subsequence:
+        shape: 0.5863900595333127 # computed from dev-clean + dev-other
+        loc: -1.7651190837583153
+        scale: 17.470656912691766
+        instance_sample_prob: 0.8
+        max_word_length: 80 # in word-level
+        min_word_length: 10 # in word-level
 
 testing:                            # specify which inference algorithm to use for testing (for validation it's always greedy decoding)
     beam_size: 10                    # size of the beam for beam search
@@ -60,7 +67,7 @@ training:                           # specify training details here
     reset_best_ckpt: False          # if True, reset the tracking of the best checkpoint and scores. Use for domain adaptation or fine-tuning with new metrics or dev data.
     reset_scheduler: False          # if True, overwrite scheduler in loaded checkpoint with parameters specified in this config. Use for domain adaptation or fine-tuning.
     reset_optimizer: False          # if True, overwrite optimizer in loaded checkpoint with parameters specified in this config. Use for domain adaptation or fine-tuning.
-    random_seed: 123                # set this seed to make training deterministic
+    random_seed: 100                # set this seed to make training deterministic
     optimizer: "adam"               # choices: "sgd", "adam", "adadelta", "adagrad", "rmsprop", default is SGD
     adam_betas: [0.9, 0.99]         # beta parameters for Adam. These are the defaults. Typically these are different for Transformer models.
     scheduling: "warmupinversesquareroot"   # learning rate scheduling, optional, if not specified stays constant, options: "plateau", "exponential", "decaying", "noam" (for Transformer), "warmupexponentialdecay", "warmupinversesquareroot"
@@ -83,16 +90,17 @@ training:                           # specify training details here
     logging_freq: 100               # log the training progress after this many updates, default: 100
     eval_metrics: "wer"             # validation metric, default: "bleu", other options: "chrf", "token_accuracy", "sequence_accuracy", "wer"
     early_stopping_metric: "eval_metric"    # when a new high score on this metric is achieved, a checkpoint is written, when "eval_metric" (the first one in the list above) or "acc" is maximized, when "loss" or "ppl" is minimized
-    model_dir: "models/librispeech" # directory where models and validation results are stored, required
-    overwrite: False                # overwrite existing model directory, default: False. Do not set to True unless for debugging!
+    model_dir: "/scratch5t/ohta/models/joeynmt/librispeech100_s_sa_seed100" # directory where models and validation results are stored, required
+    overwrite: True                # overwrite existing model directory, default: False. Do not set to True unless for debugging!
     shuffle: True                   # shuffle the training data, default: True
     use_cuda: True                  # use CUDA for acceleration on GPU, required. Set to False when working on CPU.
     max_output_length: 100          # maximum output length for decoding, default: None. If set to None, allow sentences of max 1.5*src length
     print_valid_sents: [0, 1, 2]    # print this many validation sentences during each validation run, default: [0, 1, 2]
-    keep_last_ckpts: 3              # keep this many of the latest checkpoints, if -1: all of them, default: 5
+    keep_last_ckpts: -1              # keep this many of the latest checkpoints, if -1: all of them, default: 5
+    save_latest_ckpt: True          # this options saves a checkpoint every validation run, even if it wasn't the best, and then deletes the previous checkpoint.
     label_smoothing: 0.1            # label smoothing: reference tokens will have 1-label_smoothing probability instead of 1, rest of probability mass is uniformly distributed over the rest of the vocabulary, default: 0.0 (off)
     loss: "crossentropy-ctc"       # loss function; one of {"crossentropy", "crossentropy-ctc"}
-    ctc_weight: 0.3                 # interpolation weight (used in "crossentropy-ctc" loss)
+    ctc_weight: 0.1                 # interpolation weight (used in "crossentropy-ctc" loss)
 
 model:                              # specify your model architecture here
     initializer: "xavier"           # initializer for all trainable weights (xavier, zeros, normal, uniform)

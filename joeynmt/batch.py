@@ -204,11 +204,13 @@ class SpeechBatch(Batch):
         if self.seq_subsampler is not None:
             word_start, word_end = self.seq_subsampler(word2bpe)
 
+        # get positions to be replaced on
         if self.mask_sampler is not None:
             batch_positions = self.mask_sampler(textgrids)
 
-        if self.masked_lm is not None: # get positions to be replaced
-            batch_positions = self.masked_lm(batch_positions, textgrids)
+        # get words to be replaced with
+        if sum([1 if len(p) > 0 else 0 for p in batch_positions]) > 0 and self.masked_lm is not None:
+            batch_positions = self.masked_lm(batch_positions, textgrids, self.steps)
 
         for i in range(batch_size):
             tg = textgrids[i] if textgrids is not None else None
@@ -229,8 +231,12 @@ class SpeechBatch(Batch):
                     assert w2b is not None
                     #assert w2b[-1][-1] <= trg_length[i], (w2b, trg_length[i])
                     trg_aug = self.masked_lm.replace_trg(trg_input[i, :t_l], pos, w2b, word_cutoff)
-                    trg_length_aug[i] = len(trg_aug)
-                    trg_input_aug[i, :len(trg_aug)] = trg_aug
+                    trg_len_aug = len(trg_aug)
+                    if trg_len_aug > self.max_trg_length: # truncate
+                        trg_len_aug = self.max_trg_length
+                        trg_aug = trg_aug[:trg_len_aug]
+                    trg_length_aug[i] = trg_len_aug
+                    trg_input_aug[i, :trg_len_aug] = trg_aug
                     trg_cutoff_flag = False
 
                 if self.aligned_masking is not None:

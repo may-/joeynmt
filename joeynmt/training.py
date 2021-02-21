@@ -251,7 +251,7 @@ class TrainManager:
                 self.specaugment = SpecAugment(**config["data"]["specaugment"])
                 logger.info(self.specaugment)
 
-            self.sampler = None
+            self.mask_sampler = None
             if "sampler" in config["data"].keys():
                 self.mask_sampler = Sampler(config["data"]["sampler"], unk_token=UNK_TOKEN)
                 logger.info(self.mask_sampler)
@@ -330,6 +330,10 @@ class TrainManager:
             self.stats.steps,
             "total_tokens":
             self.stats.total_tokens,
+            "total_seqs":
+            self.stats.total_seqs,
+            "total_batches":
+            self.stats.total_batches,
             "best_ckpt_score":
             self.stats.best_ckpt_score,
             "best_ckpt_iteration":
@@ -351,6 +355,7 @@ class TrainManager:
             if self.ckpt_queue.maxlen is not None \
                     and len(self.ckpt_queue) == self.ckpt_queue.maxlen:
                 to_delete = self.ckpt_queue.popleft()  # delete oldest ckpt
+                logger.info(f"Deleting checkpoint: {to_delete}")
                 delete_ckpt(to_delete)
 
             self.ckpt_queue.append(model_path)
@@ -374,6 +379,7 @@ class TrainManager:
                         can_delete = False
                         break
                 if can_delete and previous_path is not None:
+                    logger.info(f"Deleting checkpoint: {previous_path}")
                     delete_ckpt(previous_path)
 
     def init_from_checkpoint(self,
@@ -510,6 +516,9 @@ class TrainManager:
             start = time.time()
             total_valid_duration = 0
             start_tokens = self.stats.total_tokens
+            epoch_tokens = self.stats.total_tokens
+            epoch_seqs = self.stats.total_seqs
+            epoch_batches = self.stats.total_batches
             self.model.zero_grad()
             epoch_loss = 0
             batch_loss = 0
@@ -620,11 +629,13 @@ class TrainManager:
             logger.info('Epoch %3d: total training loss %.2f, num updates: %6d, '
                         'num instances: %6d, num tokens: %6d, num batches: %6d',
                         epoch_no + 1, epoch_loss, self.stats.steps,
-                        self.stats.total_seqs, self.stats.total_tokens,
-                        self.stats.total_batches)
+                        self.stats.total_seqs - epoch_seqs,
+                        self.stats.total_tokens - epoch_tokens,
+                        self.stats.total_batches - epoch_batches)
 
-            if self.masked_lm is not None:
-                self.masked_lm.reset_stats()
+            # reset stats
+            if self.audio_dict is not None:
+                self.audio_dict.reset_stats()
         else:
             logger.info('Training ended after %3d epochs.', epoch_no + 1)
         metric_name = self.eval_metrics[0] \
@@ -674,6 +685,7 @@ class TrainManager:
                                       "or summation of loss 'none' implemented")
 
         norm_batch_loss = batch_loss / normalizer
+        correct_tokens = correct_tokens / batch.ntokens
         for l in  auxiliary_losses.keys():
             auxiliary_losses[l] = auxiliary_losses[l] / normalizer
 
@@ -685,6 +697,7 @@ class TrainManager:
 
         if self.batch_multiplier > 1:
             norm_batch_loss = norm_batch_loss / self.batch_multiplier
+            correct_tokens = correct_tokens / self.batch_multiplier
             for l in  auxiliary_losses.keys():
                 auxiliary_losses[l] = auxiliary_losses[l] / self.batch_multiplier
 
@@ -701,7 +714,7 @@ class TrainManager:
         self.stats.total_batches += 1
 
         ret = {'loss': norm_batch_loss.item(),
-               'acc': (correct_tokens/batch.ntokens).item()}
+               'acc': correct_tokens.item()}
         ret.update(auxiliary_losses)
         return ret
 
@@ -957,8 +970,6 @@ def train(cfg_file: str) -> None:
     """
     # read config file
     cfg = load_config(cfg_file)
-    log_cfg(cfg) # write all entries of config to the log
-
     task = cfg["data"]["task"]  # "MT" or "s2t"
 
     # make logger
@@ -967,6 +978,9 @@ def train(cfg_file: str) -> None:
                                    "overwrite", False))
     _ = make_logger(model_dir, mode="train")  # version string returned
     # TODO: save version number in model checkpoints
+
+    # write all entries of config to the log
+    log_cfg(cfg)
 
     # store copy of original training config in model dir
     shutil.copy2(cfg_file, os.path.join(model_dir, "config.yaml"))

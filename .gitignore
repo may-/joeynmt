@@ -4,3 +4,9 @@ dist/*
 *.egg-info/*
 docs/build/*
 *__pycache__*
+
+test/data/
+models/
+jnmt/
+notebook/
+

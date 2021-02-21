@@ -1,6 +1,6 @@
 future
 pillow
-numpy<1.19.0,>=1.14.5 
+numpy
 setuptools>=41.0.0
 torch==1.7.1
 tensorboard>=1.15

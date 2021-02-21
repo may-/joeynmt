@@ -334,6 +334,22 @@ def symlink_update(target, link_name):
             raise e
 
 
+def delete_ckpt(to_delete: str) -> None:
+    """
+    Delete checkpoint
+
+    :param to_delete: filename of the checkpint to be deleted
+    """
+    try:
+        os.remove(to_delete)
+    except FileNotFoundError as e:
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            "Wanted to delete old checkpoint %s but "
+            "file does not exist. (%s)", to_delete, e)
+        #raise e
+
+
 def latest_checkpoint_update(target: pathlib.Path,
                              link_name: str) -> Optional[pathlib.Path]:
     """

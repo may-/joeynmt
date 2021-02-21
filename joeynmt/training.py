@@ -24,8 +24,8 @@ from joeynmt.model import build_model
 from joeynmt.batch import Batch
 from joeynmt.helpers import log_data_info, load_config, log_cfg, \
     store_attention_plots, load_checkpoint, make_model_dir, \
-    make_logger, set_seed, symlink_update, latest_checkpoint_update, \
-    ConfigurationError
+    make_logger, set_seed, symlink_update, delete_ckpt, \
+    latest_checkpoint_update, ConfigurationError
 from joeynmt.model import Model, _DataParallel
 from joeynmt.prediction import validate_on_data
 from joeynmt.loss import XentLoss
@@ -96,8 +96,9 @@ class TrainManager:
         # validation & early stopping
         self.validation_freq = train_config.get("validation_freq", 1000)
         self.log_valid_sents = train_config.get("print_valid_sents", [0, 1, 2])
+        maxlen = train_config.get("keep_last_ckpts", 5)
         self.ckpt_queue = collections.deque(
-            maxlen=train_config.get("keep_last_ckpts", 5))
+            maxlen=maxlen if maxlen > 0 else None)
         self.eval_metric = train_config.get("eval_metric", "bleu")
         if self.eval_metric not in [
                 'bleu', 'chrf', 'token_accuracy', 'sequence_accuracy'
@@ -153,8 +154,7 @@ class TrainManager:
         self.epochs = train_config["epochs"]
         self.batch_size = train_config["batch_size"]
         # Placeholder so that we can use the train_iter in other functions.
-        self.train_iter = None
-        self.train_iter_state = None
+        self.train_iter, self.train_iter_state = None, None
         # per-device batch_size = self.batch_size // self.n_gpu
         self.batch_type = train_config.get("batch_type", "sentence")
         self.eval_batch_size = train_config.get("eval_batch_size",
@@ -225,6 +225,7 @@ class TrainManager:
         """
         model_path = os.path.join(self.model_dir,
                                   "{}.ckpt".format(self.stats.steps))
+        logger.info("Saving new checkpoint: %s", model_path)
         model_state_dict = self.model.module.state_dict() \
             if isinstance(self.model, torch.nn.DataParallel) \
             else self.model.state_dict()
@@ -251,14 +252,10 @@ class TrainManager:
         torch.save(state, model_path)
         symlink_target = "{}.ckpt".format(self.stats.steps)
         if new_best:
-            if len(self.ckpt_queue) == self.ckpt_queue.maxlen:
+            if self.ckpt_queue.maxlen is not None and \
+                    len(self.ckpt_queue) == self.ckpt_queue.maxlen:
                 to_delete = self.ckpt_queue.popleft()  # delete oldest ckpt
-                try:
-                    os.remove(to_delete)
-                except FileNotFoundError:
-                    logger.warning(
-                        "Wanted to delete old checkpoint %s but "
-                        "file does not exist.", to_delete)
+                delete_ckpt(to_delete)
 
             self.ckpt_queue.append(model_path)
 
@@ -274,13 +271,14 @@ class TrainManager:
             last_path = "{}/latest.ckpt".format(self.model_dir)
             previous_path = latest_checkpoint_update(symlink_target, last_path)
             # If the last ckpt is in the ckpt_queue, we don't want to delete it.
-            can_delete = True
-            for ckpt_path in self.ckpt_queue:
-                if pathlib.Path(ckpt_path).resolve() == previous_path:
-                    can_delete = False
-                    break
-            if can_delete and previous_path is not None:
-                os.remove(previous_path)
+            if self.ckpt_queue.maxlen is not None:
+                can_delete = True
+                for ckpt_path in self.ckpt_queue:
+                    if pathlib.Path(ckpt_path).resolve() == previous_path:
+                        can_delete = False
+                        break
+                if can_delete and previous_path is not None:
+                    delete_ckpt(previous_path)
 
     def init_from_checkpoint(self,
                              path: str,
@@ -587,10 +585,8 @@ class TrainManager:
             self.stats.best_ckpt_iter = self.stats.steps
             logger.info('Hooray! New best validation result [%s]!',
                         self.early_stopping_metric)
-            if self.ckpt_queue.maxlen > 0:
-                logger.info("Saving new checkpoint.")
-                new_best = True
-                self._save_checkpoint(new_best)
+            new_best = True
+            self._save_checkpoint(new_best)
         elif self.save_latest_checkpoint:
             self._save_checkpoint(new_best)
 

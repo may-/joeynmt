@@ -82,7 +82,7 @@ class RecurrentEncoder(Encoder):
         """
         assert embed_src.shape[0] == src_length.shape[0]
         assert embed_src.shape[2] == self.emb_size
-       # assert mask.shape == embed_src.shape
+        #assert mask.shape == embed_src.shape
         assert len(src_length.shape) == 1
 
     #pylint: disable=arguments-differ
@@ -145,7 +145,7 @@ class RecurrentEncoder(Encoder):
         return output, hidden_concat
 
     def __repr__(self):
-        return "%s(%r)" % (self.__class__.__name__, self.rnn)
+        return "%s(rnn=%r)" % (self.__class__.__name__, self.rnn)
 
 
 class TransformerEncoder(Encoder):

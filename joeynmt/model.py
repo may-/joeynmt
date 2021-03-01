@@ -24,7 +24,6 @@ class Model(nn.Module):
     """
     Base Model class
     """
-
     def __init__(self,
                  encoder: Encoder,
                  decoder: Decoder,
@@ -50,14 +49,14 @@ class Model(nn.Module):
         self.decoder = decoder
         self.src_vocab = src_vocab
         self.trg_vocab = trg_vocab
-        self.bos_index = self.trg_vocab.stoi[BOS_TOKEN]
         self.pad_index = self.trg_vocab.stoi[PAD_TOKEN]
+        self.bos_index = self.trg_vocab.stoi[BOS_TOKEN]
         self.eos_index = self.trg_vocab.stoi[EOS_TOKEN]
-        self._loss_function = None # set by the TrainManager
+        #self.loss_function = None # set by the TrainManager
 
     @property
     def loss_function(self):
-        return self._x
+        return self._loss_function
 
     @loss_function.setter
     def loss_function(self, loss_function: Callable):
@@ -187,9 +186,11 @@ class Model(nn.Module):
                "\tencoder=%s,\n" \
                "\tdecoder=%s,\n" \
                "\tsrc_embed=%s,\n" \
-               "\ttrg_embed=%s)" % (self.__class__.__name__, self.encoder,
-                                    self.decoder, self.src_embed,
-                                    self.trg_embed)
+               "\ttrg_embed=%s,\n" \
+               "\tloss_function=%s)" % (self.__class__.__name__,
+                                        self.encoder, self.decoder,
+                                        self.src_embed, self.trg_embed,
+                                        self.loss_function)
 
 
 class _DataParallel(nn.DataParallel):

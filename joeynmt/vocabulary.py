@@ -4,10 +4,11 @@
 Vocabulary module
 """
 from collections import defaultdict, Counter
-from typing import List
-import numpy as np
+import functools
+import operator
 
-from torchtext.data import Dataset
+from typing import List, Tuple
+import numpy as np
 
 from joeynmt.constants import UNK_TOKEN, DEFAULT_UNK_ID, \
     EOS_TOKEN, BOS_TOKEN, PAD_TOKEN
@@ -140,17 +141,34 @@ class Vocabulary:
                                        skip_pad=skip_pad))
         return sentences
 
+    def sentences_to_ids(self, sentences: List[List[str]]) \
+            -> Tuple[List[List[int]], List[int]]:
+        """
+        Encode sentences to indices and pad sequences
+        :param sentences: list of tokenized sentences
+        :return: padded ids and lengths
+        """
+        bos = self.stoi[BOS_TOKEN]
+        eos = self.stoi[EOS_TOKEN]
+        max_len = max([len(sent) for sent in sentences]) + 2
+        padded, lengths = [], []
+        for sent in sentences:
+            ids = [bos] + [self.stoi[s] for s in sent] + [eos]
+            offset = max(0, max_len - len(ids))
+            padded.append(ids + [self.stoi[PAD_TOKEN]] * offset)
+            lengths.append(len(ids))
+        return padded, lengths
 
-def build_vocab(field: str, max_size: int, min_freq: int, dataset: Dataset,
+
+def build_vocab(max_size: int, min_freq: int, tokens: List[List[str]],
                 vocab_file: str = None) -> Vocabulary:
     """
     Builds vocabulary for a torchtext `field` from given`dataset` or
     `vocab_file`.
 
-    :param field: attribute e.g. "src"
     :param max_size: maximum size of vocabulary
     :param min_freq: minimum frequency for an item to be included
-    :param dataset: dataset to load data for field from
+    :param tokens: list of tokenized sentences (raw dataset)
     :param vocab_file: file to store the vocabulary,
         if not None, load vocabulary from here
     :return: Vocabulary created from either `dataset` or `vocab_file`
@@ -174,17 +192,9 @@ def build_vocab(field: str, max_size: int, min_freq: int, dataset: Dataset,
             tokens_and_frequencies = sorted(counter.items(),
                                             key=lambda tup: tup[0])
             tokens_and_frequencies.sort(key=lambda tup: tup[1], reverse=True)
-            vocab_tokens = [i[0] for i in tokens_and_frequencies[:limit]]
-            return vocab_tokens
+            return [i[0] for i in tokens_and_frequencies[:limit]]
 
-        tokens = []
-        for i in dataset.examples:
-            if field == "src":
-                tokens.extend(i.src)
-            elif field == "trg":
-                tokens.extend(i.trg)
-
-        counter = Counter(tokens)
+        counter = Counter(functools.reduce(operator.iconcat, tokens, []))
         if min_freq > -1:
             counter = filter_min(counter, min_freq)
         vocab_tokens = sort_and_cut(counter, max_size)

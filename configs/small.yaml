@@ -33,6 +33,7 @@ training:                           # specify training details here
     reset_best_ckpt: False          # if True, reset the tracking of the best checkpoint and scores. Use for domain adaptation or fine-tuning with new metrics or dev data.
     reset_scheduler: False          # if True, overwrite scheduler in loaded checkpoint with parameters specified in this config. Use for domain adaptation or fine-tuning.
     reset_optimizer: False          # if True, overwrite optimizer in loaded checkpoint with parameters specified in this config. Use for domain adaptation or fine-tuning.
+    reset_iter_state: False         # if True, reset the random sampler in train data loader. ignored if shuffle = False
     random_seed: 42                 # set this seed to make training deterministic
     optimizer: "adam"               # choices: "sgd", "adam", "adadelta", "adagrad", "rmsprop", default is SGD
     adam_betas: [0.9, 0.999]        # beta parameters for Adam. These are the defaults. Typically these are different for Transformer models.
@@ -68,6 +69,7 @@ training:                           # specify training details here
     keep_last_ckpts: 3              # keep this many of the latest checkpoints, if -1: all of them, default: 5
     label_smoothing: 0.0            # label smoothing: reference tokens will have 1-label_smoothing probability instead of 1, rest of probability mass is uniformly distributed over the rest of the vocabulary, default: 0.0 (off)
     save_latest_ckpt: True          # this options saves a checkpoint every validation run, even if it wasn't the best, and then deletes the previous checkpoint.
+    num_workers: 0                  # number of workers which is passed to torch.utils.data.DataLoader, if 0: no multi-processing, default 0.
 
 model:                              # specify your model architecture here
     initializer: "xavier"           # initializer for all trainable weights (xavier, zeros, normal, uniform)

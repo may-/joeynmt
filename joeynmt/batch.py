@@ -3,7 +3,6 @@
 """
 Implementation of a mini-batch.
 """
-import torch
 
 
 class Batch:
@@ -11,18 +10,21 @@ class Batch:
     Input is a batch from a torch text iterator.
     """
     # pylint: disable=too-many-instance-attributes
-    def __init__(self, torch_batch, pad_index, use_cuda=False):
+    def __init__(self, src, src_length, trg, trg_length, pad_index):
         """
         Create a new joey batch from a torch batch.
         This batch extends torch text's batch attributes with src and trg
         length, masks, number of non-padded tokens in trg.
         Furthermore, it can be sorted by src length.
 
-        :param torch_batch:
+        :param src:
+        :param src_length:
+        :param trg:
+        :param trg_length:
         :param pad_index:
-        :param use_cuda:
         """
-        self.src, self.src_length = torch_batch.src
+        self.src = src
+        self.src_length = src_length
         self.src_mask = (self.src != pad_index).unsqueeze(1)
         self.nseqs = self.src.size(0)
         self.trg_input = None
@@ -30,11 +32,10 @@ class Batch:
         self.trg_mask = None
         self.trg_length = None
         self.ntokens = None
-        self.use_cuda = use_cuda
-        self.device = torch.device("cuda" if self.use_cuda else "cpu")
+        #self.use_cuda = use_cuda
+        #self.device = torch.device("cuda" if self.use_cuda else "cpu")
 
-        if hasattr(torch_batch, "trg"):
-            trg, trg_length = torch_batch.trg
+        if trg is not None and trg_length is not None:
             # trg_input is used for teacher forcing, last one is cut off
             self.trg_input = trg[:, :-1]
             self.trg_length = trg_length
@@ -44,23 +45,21 @@ class Batch:
             self.trg_mask = (self.trg_input != pad_index).unsqueeze(1)
             self.ntokens = (self.trg != pad_index).data.sum().item()
 
-        if self.use_cuda:
-            self._make_cuda()
+        #if self.use_cuda:
+        #    self._make_cuda()
 
-    def _make_cuda(self):
+    def make_cuda(self, device) -> None:
         """
         Move the batch to GPU
-
-        :return:
         """
-        self.src = self.src.to(self.device)
-        self.src_mask = self.src_mask.to(self.device)
-        self.src_length = self.src_length.to(self.device)
+        self.src = self.src.to(device)
+        self.src_mask = self.src_mask.to(device)
+        self.src_length = self.src_length.to(device)
 
         if self.trg_input is not None:
-            self.trg_input = self.trg_input.to(self.device)
-            self.trg = self.trg.to(self.device)
-            self.trg_mask = self.trg_mask.to(self.device)
+            self.trg_input = self.trg_input.to(device)
+            self.trg = self.trg.to(device)
+            self.trg_mask = self.trg_mask.to(device)
 
     def sort_by_src_length(self):
         """
@@ -92,7 +91,7 @@ class Batch:
             self.trg_length = sorted_trg_length
             self.trg = sorted_trg
 
-        if self.use_cuda:
-            self._make_cuda()
+        #if self.use_cuda:
+        #    self._make_cuda()
 
         return rev_index

@@ -450,8 +450,8 @@ class RecurrentDecoder(Decoder):
         return (hidden, hidden) if isinstance(self.rnn, nn.LSTM) else hidden
 
     def __repr__(self):
-        return "RecurrentDecoder(rnn=%r, attention=%r)" % (
-            self.rnn, self.attention)
+        return "%s(rnn=%r, attention=%r)" % (self.__class__.__name__,
+                                             self.rnn, self.attention)
 
 
 # pylint: disable=arguments-differ,too-many-arguments

@@ -76,3 +76,7 @@ class XentLoss(nn.Module):
         loss = self.criterion(
             log_probs.contiguous().view(-1, log_probs.size(-1)), targets)
         return loss
+
+    def __repr__(self) -> str:
+        return "%s(criterion=%s, smoothing=%s)" % (
+            self.__class__.__name__, self.criterion, self.smoothing)

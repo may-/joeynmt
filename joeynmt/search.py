@@ -221,30 +221,23 @@ def beam_search(model: Model, size: int,
 
     # Transformer only: create target mask
     if transformer:
-        trg_mask = src_mask.new_ones([1, 1, 1])  # transformer only
+        trg_mask = src_mask.new_ones([1, 1, 1])
         if isinstance(model, torch.nn.DataParallel):
-            trg_mask = torch.stack(
-                [src_mask.new_ones([1, 1]) for _ in model.device_ids])
+            trg_mask = torch.stack([src_mask.new_ones([1, 1])
+                                    for _ in model.device_ids])
 
     # numbering elements in the batch
     batch_offset = torch.arange(batch_size, dtype=torch.long, device=device)
 
     # numbering elements in the extended batch, i.e. beam size copies of each
     # batch element
-    beam_offset = torch.arange(
-        0,
-        batch_size * size,
-        step=size,
-        dtype=torch.long,
-        device=device)
+    beam_offset = torch.arange(0, batch_size * size,
+                               step=size, dtype=torch.long, device=device)
 
     # keeps track of the top beam size hypotheses to expand for each element
     # in the batch to be further decoded (that are still "alive")
-    alive_seq = torch.full(
-        [batch_size * size, 1],
-        bos_index,
-        dtype=torch.long,
-        device=device)
+    alive_seq = torch.full([batch_size * size, 1], bos_index,
+                           dtype=torch.long, device=device)
 
     # Give full probability to the first beam on the first step.
     topk_log_probs = torch.zeros(batch_size, size, device=device)

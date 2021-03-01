@@ -17,8 +17,7 @@ import numpy as np
 import torch
 from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
-
-from torchtext.data import Dataset
+from torch.utils.data import Dataset
 
 from joeynmt.model import build_model
 from joeynmt.batch import Batch
@@ -33,15 +32,16 @@ from joeynmt.builders import build_optimizer, build_scheduler, \
     build_gradient_clipper
 from joeynmt.prediction import test
 
+logger = logging.getLogger(__name__)
+
 # for fp16 training
 try:
     from apex import amp
     amp.register_half_function(torch, "einsum")
 except ImportError as no_apex:
+    logger.debug(no_apex)
     # error handling in TrainManager object construction
     pass
-
-logger = logging.getLogger(__name__)
 
 
 # pylint: disable=too-many-instance-attributes
@@ -86,6 +86,7 @@ class TrainManager:
             raise ConfigurationError("Invalid normalization option."
                                      "Valid options: "
                                      "'batch', 'tokens', 'none'.")
+        logger.info(self.model)
 
         # optimization
         self.learning_rate_min = train_config.get("learning_rate_min", 1.0e-8)
@@ -151,6 +152,7 @@ class TrainManager:
         if self.level not in ["word", "bpe", "char"]:
             raise ConfigurationError("Invalid segmentation level. "
                                      "Valid options: 'word', 'bpe', 'char'.")
+        self.seed = train_config.get("random_seed", 42)
         self.shuffle = train_config.get("shuffle", True)
         self.epochs = train_config["epochs"]
         self.max_updates = train_config.get("updates", np.inf)
@@ -176,6 +178,14 @@ class TrainManager:
         self.device = torch.device("cuda" if self.use_cuda else "cpu")
         if self.use_cuda:
             self.model.to(self.device)
+        self.num_workers = train_config.get("num_workers", 0)
+        if self.num_workers > 0:
+            if 'pathos' not in sys.modules:
+                logger.debug("pathos multiproccessing is not available.")
+                self.num_workers = 0
+            else:
+                self.num_workers = min(multiprocessing.cpu_count(),
+                                       self.num_workers)
 
         # fp16
         self.fp16 = train_config.get("fp16", False)
@@ -249,7 +259,7 @@ class TrainManager:
             'amp_state':
             amp.state_dict() if self.fp16 else None,
             "train_iter_state":
-            self.train_iter.state_dict()
+            self.train_iter.batch_sampler.sampler.generator.get_state()
         }
         torch.save(state, model_path)
         symlink_target = f"{self.stats.steps}.ckpt"
@@ -306,7 +316,7 @@ class TrainManager:
                                 use the one stored in the checkpoint.
         """
         logger.info("Loading model from %s", path)
-        model_checkpoint = load_checkpoint(path=path, use_cuda=self.use_cuda)
+        model_checkpoint = load_checkpoint(path=path, device=self.device)
 
         # restore model and optimizer parameters
         self.model.load_state_dict(model_checkpoint["model_state"])
@@ -358,13 +368,18 @@ class TrainManager:
         :param valid_data: validation data
         """
         self.train_iter = make_data_iter(train_data,
+                                         src_vocab=self.model.src_vocab,
+                                         trg_vocab=self.model.trg_vocab,
+                                         batch_class=self.batch_class,
                                          batch_size=self.batch_size,
                                          batch_type=self.batch_type,
-                                         train=True,
-                                         shuffle=self.shuffle)
+                                         seed=self.seed,
+                                         shuffle=self.shuffle,
+                                         num_workers=self.num_workers)
 
         if self.train_iter_state is not None:
-            self.train_iter.load_state_dict(self.train_iter_state)
+            self.train_iter.batch_sampler.sampler.generator.set_state(
+                self.train_iter_state.cpu())
 
         #################################################################
         # simplify accumulation logic:
@@ -373,7 +388,7 @@ class TrainManager:
         #     self.model.zero_grad()
         #     epoch_loss = 0.0
         #     batch_loss = 0.0
-        #     for i, batch in enumerate(iter(self.train_iter)):
+        #     for i, batch in enumerate(self.train_iter):
         #
         #         # gradient accumulation:
         #         # loss.backward() inside _train_step()
@@ -397,10 +412,11 @@ class TrainManager:
             "\t16-bits training: %r\n"
             "\tgradient accumulation: %d\n"
             "\tbatch size per device: %d\n"
-            "\ttotal batch size (w. parallel & accumulation): %d", self.device,
-            self.n_gpu, self.fp16, self.batch_multiplier, self.batch_size //
-            self.n_gpu if self.n_gpu > 1 else self.batch_size,
-            self.batch_size * self.batch_multiplier)
+            "\ttotal batch size (w. parallel & accumulation): %d\n",
+            "\tnum. of multiprocessing workers: %d", self.device.type,
+            self.n_gpu, self.fp16, self.batch_multiplier,
+            self.batch_size // self.n_gpu if self.n_gpu > 1 else self.batch_size,
+            self.batch_size * self.batch_multiplier, self.num_workers)
 
         for epoch_no in range(self.epochs):
             logger.info("EPOCH %d", epoch_no + 1)
@@ -418,10 +434,12 @@ class TrainManager:
             epoch_loss = 0
             batch_loss = 0
 
-            for i, batch in enumerate(iter(self.train_iter)):
+            for i, batch in enumerate(self.train_iter):
                 # create a Batch object from torchtext batch
-                batch = self.batch_class(batch, self.model.pad_index,
-                                         use_cuda=self.use_cuda)
+                batch.sort_by_src_length()
+                batch.make_cuda(self.device)
+                #batch = self.batch_class(batch, self.model.pad_index,
+                #                         use_cuda=self.use_cuda)
 
                 # get batch loss
                 batch_loss += self._train_step(batch)
@@ -507,7 +525,7 @@ class TrainManager:
         # reactivate training
         self.model.train()
 
-        # get loss
+        # get loss (run as during training with teacher forcing)
         batch_loss, _, _, _ = self.model(return_type="loss", **vars(batch))
 
         # sum multi-gpu losses
@@ -557,7 +575,7 @@ class TrainManager:
                 data=valid_data,
                 eval_metric=self.eval_metric,
                 level=self.level, model=self.model,
-                use_cuda=self.use_cuda,
+                device=self.device,
                 max_output_length=self.max_output_length,
                 compute_loss=True,
                 beam_size=1,                # greedy validations
@@ -785,15 +803,13 @@ def train(cfg_file: str) -> None:
     model = build_model(cfg["model"], src_vocab=src_vocab, trg_vocab=trg_vocab)
 
     # for training management, e.g. early stopping and model selection
-    trainer = TrainManager(model=model, config=cfg)
+    trainer = TrainManager(model=model, config=cfg, batch_class=Batch)
 
     # store copy of original training config in model dir
     shutil.copy2(cfg_file, os.path.join(model_dir, "config.yaml"))
 
     # log all entries of config
     log_cfg(cfg)
-
-    logger.info(str(model))
 
     # store the vocabs
     src_vocab_file = os.path.join(cfg["training"]["model_dir"], "src_vocab.txt")

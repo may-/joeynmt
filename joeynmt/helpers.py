@@ -18,8 +18,8 @@ import pkg_resources
 import torch
 from torch import nn, Tensor
 from torch.utils.tensorboard import SummaryWriter
+from torch.utils.data import Dataset
 
-from torchtext.data import Dataset
 import yaml
 from joeynmt.vocabulary import Vocabulary
 from joeynmt.plotting import plot_heatmap
@@ -149,16 +149,14 @@ def log_data_info(train_data: Dataset, valid_data: Dataset, test_data: Dataset,
     :param trg_vocab:
     """
     logger = logging.getLogger(__name__)
-    logger.info(
-        "Data set sizes: \n\ttrain %10d,\n\t  dev %10d,\n\t test %10d",
-        len(train_data) if train_data is not None else 0,
-        len(valid_data) if valid_data is not None else 0,
-        len(test_data) if test_data is not None else 0)
+    logger.info("train dataset: %s", train_data)
+    logger.info("valid dataset: %s", valid_data)
+    logger.info(" test dataset: %s", test_data)
 
     if train_data:
         logger.info("First training example:\n\t[SRC] %s\n\t[TRG] %s",
-                    " ".join(vars(train_data[0])['src']),
-                    " ".join(vars(train_data[0])['trg']))
+                    " ".join(train_data.src[0]),
+                    " ".join(train_data.trg[0]))
 
     logger.info(
         "First 10 words (src): %s",
@@ -270,16 +268,16 @@ def get_latest_checkpoint(ckpt_dir: str) -> Optional[str]:
     return latest_checkpoint
 
 
-def load_checkpoint(path: str, use_cuda: bool = True) -> dict:
+def load_checkpoint(path: str, device: torch.device) -> dict:
     """
     Load model from saved checkpoint.
 
     :param path: path to checkpoint
-    :param use_cuda: using cuda or not
+    :param device: using cuda or not
     :return: checkpoint (dict)
     """
     assert os.path.isfile(path), "Checkpoint %s not found" % path
-    checkpoint = torch.load(path, map_location='cuda' if use_cuda else 'cpu')
+    checkpoint = torch.load(path, map_location=device)
     return checkpoint
 
 

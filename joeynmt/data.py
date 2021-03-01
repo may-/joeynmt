@@ -3,19 +3,22 @@
 Data module
 """
 import sys
-import random
 import os
-import os.path
-from typing import Optional
+from pathlib import Path
+from itertools import zip_longest
+from typing import Optional, List, Tuple, Callable, Union
 import logging
 
-from torchtext.datasets import TranslationDataset
-from torchtext import data
-from torchtext.data import Dataset, Iterator, Field
+import numpy as np
+
+import torch
+from torch.utils.data import Dataset, Sampler, SequentialSampler, \
+    RandomSampler, BatchSampler, DataLoader
 
 from joeynmt.constants import UNK_TOKEN, EOS_TOKEN, BOS_TOKEN, PAD_TOKEN
 from joeynmt.helpers import log_data_info
 from joeynmt.vocabulary import build_vocab, Vocabulary
+from joeynmt.batch import Batch
 
 logger = logging.getLogger(__name__)
 
@@ -59,42 +62,26 @@ def load_data(data_cfg: dict, datasets: list = None)\
 
     level = data_cfg["level"]
     lowercase = data_cfg["lowercase"]
-    max_sent_length = data_cfg["max_sent_length"]
+    max_len = data_cfg["max_sent_length"]
 
     tok_fun = lambda s: list(s) if level == "char" else s.split()
 
-    src_field = data.Field(init_token=None, eos_token=EOS_TOKEN,
-                           pad_token=PAD_TOKEN, tokenize=tok_fun,
-                           batch_first=True, lower=lowercase,
-                           unk_token=UNK_TOKEN,
-                           include_lengths=True)
-
-    trg_field = data.Field(init_token=BOS_TOKEN, eos_token=EOS_TOKEN,
-                           pad_token=PAD_TOKEN, tokenize=tok_fun,
-                           unk_token=UNK_TOKEN,
-                           batch_first=True, lower=lowercase,
-                           include_lengths=True)
-
-    train_data = None
+    train_data, train_src, train_trg = None, None, None
     if "train" in datasets and train_path is not None:
         logger.info("Loading training data...")
-        train_data = TranslationDataset(path=train_path,
-                                        exts=("." + src_lang, "." + trg_lang),
-                                        fields=(src_field, trg_field),
-                                        filter_pred=
-                                        lambda x: len(vars(x)['src'])
-                                        <= max_sent_length
-                                        and len(vars(x)['trg'])
-                                        <= max_sent_length)
+        train_src, train_trg = _read_data_file(train_path, (src_lang, trg_lang),
+                                               tok_fun, lowercase, max_len)
 
         random_train_subset = data_cfg.get("random_train_subset", -1)
         if random_train_subset > -1:
             # select this many training examples randomly and discard the rest
-            keep_ratio = random_train_subset / len(train_data)
-            keep, _ = train_data.split(
-                split_ratio=[keep_ratio, 1 - keep_ratio],
-                random_state=random.getstate())
-            train_data = keep
+            keep_index = np.random.permutation(np.arange(len(train_src)))
+            keep_index = keep_index[:random_train_subset]
+            keep_index.sort()
+            train_src = [train_src[i] for i in keep_index]
+            train_trg = [train_trg[i] for i in keep_index]
+
+        train_data = TranslationDataset(train_src, train_trg)
 
     src_max_size = data_cfg.get("src_voc_limit", sys.maxsize)
     src_min_freq = data_cfg.get("src_voc_min_freq", 1)
@@ -104,133 +91,219 @@ def load_data(data_cfg: dict, datasets: list = None)\
     src_vocab_file = data_cfg.get("src_vocab", None)
     trg_vocab_file = data_cfg.get("trg_vocab", None)
 
-    assert (train_data is not None) or (src_vocab_file is not None)
-    assert (train_data is not None) or (trg_vocab_file is not None)
+    assert (train_src is not None) or (src_vocab_file is not None)
+    assert (train_trg is not None) or (trg_vocab_file is not None)
 
     logger.info("Building vocabulary...")
-    src_vocab = build_vocab(field="src", min_freq=src_min_freq,
-                            max_size=src_max_size,
-                            dataset=train_data, vocab_file=src_vocab_file)
-    trg_vocab = build_vocab(field="trg", min_freq=trg_min_freq,
-                            max_size=trg_max_size,
-                            dataset=train_data, vocab_file=trg_vocab_file)
+    src_vocab = build_vocab(min_freq=src_min_freq, max_size=src_max_size,
+                            tokens=train_src, vocab_file=src_vocab_file)
+    trg_vocab = build_vocab(min_freq=trg_min_freq, max_size=trg_max_size,
+                            tokens=train_trg, vocab_file=trg_vocab_file)
+    assert src_vocab.stoi[UNK_TOKEN] == trg_vocab.stoi[UNK_TOKEN]
+    assert src_vocab.stoi[PAD_TOKEN] == trg_vocab.stoi[PAD_TOKEN]
+    assert src_vocab.stoi[BOS_TOKEN] == trg_vocab.stoi[BOS_TOKEN]
+    assert src_vocab.stoi[EOS_TOKEN] == trg_vocab.stoi[EOS_TOKEN]
 
     dev_data = None
     if "dev" in datasets and dev_path is not None:
         logger.info("Loading dev data...")
-        dev_data = TranslationDataset(path=dev_path,
-                                      exts=("." + src_lang, "." + trg_lang),
-                                      fields=(src_field, trg_field))
+        dev_src, dev_trg = _read_data_file(dev_path, (src_lang, trg_lang),
+                                           tok_fun, lowercase)
+        dev_data = TranslationDataset(dev_src, dev_trg)
 
     test_data = None
     if "test" in datasets and test_path is not None:
         logger.info("Loading test data...")
         # check if target exists
-        if os.path.isfile(test_path + "." + trg_lang):
-            test_data = TranslationDataset(
-                path=test_path, exts=("." + src_lang, "." + trg_lang),
-                fields=(src_field, trg_field))
-        else:
+        if not os.path.isfile(f'{test_path}.{trg_lang}'):
             # no target is given -> create dataset from src only
-            test_data = MonoDataset(path=test_path, ext="." + src_lang,
-                                    field=src_field)
-    src_field.vocab = src_vocab
-    trg_field.vocab = trg_vocab
+            trg_lang = None
+        test_src, test_trg = _read_data_file(test_path, (src_lang, trg_lang),
+                                             tok_fun, lowercase)
+        test_data = TranslationDataset(test_src, test_trg)
+
     logger.info("Data loaded.")
     log_data_info(train_data, dev_data, test_data, src_vocab, trg_vocab)
     return train_data, dev_data, test_data, src_vocab, trg_vocab
 
 
-# pylint: disable=global-at-module-level
-global max_src_in_batch, max_tgt_in_batch
-
-
-# pylint: disable=unused-argument,global-variable-undefined
-def token_batch_size_fn(new, count, sofar):
-    """Compute batch size based on number of tokens (+padding)."""
-    global max_src_in_batch, max_tgt_in_batch
-    if count == 1:
-        max_src_in_batch = 0
-        max_tgt_in_batch = 0
-    max_src_in_batch = max(max_src_in_batch, len(new.src))
-    src_elements = count * max_src_in_batch
-    if hasattr(new, 'trg'):  # for monolingual data sets ("translate" mode)
-        max_tgt_in_batch = max(max_tgt_in_batch, len(new.trg) + 2)
-        tgt_elements = count * max_tgt_in_batch
-    else:
-        tgt_elements = 0
-    return max(src_elements, tgt_elements)
-
-
 def make_data_iter(dataset: Dataset,
+                   src_vocab: Vocabulary,
+                   trg_vocab: Vocabulary,
                    batch_size: int,
                    batch_type: str = "sentence",
-                   train: bool = False,
-                   shuffle: bool = False) -> Iterator:
+                   batch_class: Batch = Batch,
+                   seed: int = 42,
+                   shuffle: bool = False,
+                   num_workers: int = 0) -> DataLoader:
     """
-    Returns a torchtext iterator for a torchtext dataset.
+    Returns a torch DataLoader for a torch Dataset. (no bucketing)
 
-    :param dataset: torchtext dataset containing src and optionally trg
+    :param dataset: torch dataset containing src and optionally trg
+    :param src_vocab:
+    :param trg_vocab:
+    :param batch_class: joeynmt batch class
     :param batch_size: size of the batches the iterator prepares
     :param batch_type: measure batch size by sentence count or by token count
-    :param train: whether it's training time, when turned off,
-        bucketing, sorting within batches and shuffling is disabled
+    :param seed: random seed for shuffling
     :param shuffle: whether to shuffle the data before each epoch
         (no effect if set to True for testing)
-    :return: torchtext iterator
+    :param num_workers: number of cpus for multiprocessing
+    :return: torch DataLoader
     """
-
-    batch_size_fn = token_batch_size_fn if batch_type == "token" else None
-
-    if train:
-        # optionally shuffle and sort during training
-        data_iter = data.BucketIterator(
-            repeat=False, sort=False, dataset=dataset,
-            batch_size=batch_size, batch_size_fn=batch_size_fn,
-            train=True, sort_within_batch=True,
-            sort_key=lambda x: len(x.src), shuffle=shuffle)
+    # sampler
+    if shuffle:
+        generator = torch.Generator()
+        generator.manual_seed(seed)
+        sampler = RandomSampler(dataset, generator=generator)
     else:
-        # don't sort/shuffle for validation/inference
-        data_iter = data.BucketIterator(
-            repeat=False, dataset=dataset,
-            batch_size=batch_size, batch_size_fn=batch_size_fn,
-            train=False, sort=False)
+        sampler = SequentialSampler(dataset)
+
+    # batch generator
+    if batch_type == "sentence":
+        batch_sampler = BatchSampler(sampler,
+                                     batch_size=batch_size,
+                                     drop_last=False)
+    elif batch_type == "token":
+        batch_sampler = TokenBatchSampler(sampler,
+                                          batch_size=batch_size,
+                                          drop_last=False)
+
+    pad_index = src_vocab.stoi[PAD_TOKEN]
+
+    def collate_fn(batch) -> Batch:
+        src_list, trg_list = zip(*batch)
+        src, src_length = src_vocab.sentences_to_ids(src_list)
+        trg, trg_length = None, None
+        if any(map(None.__ne__, trg_list)):
+            trg, trg_length = trg_vocab.sentences_to_ids(trg_list)
+
+        return batch_class(torch.LongTensor(src),
+                           torch.LongTensor(src_length),
+                           torch.LongTensor(trg) if trg else None,
+                           torch.LongTensor(trg_length) if trg_length else None,
+                           pad_index)
+
+    data_iter = DataLoader(dataset, batch_sampler=batch_sampler,
+                           collate_fn=collate_fn, num_workers=num_workers)
 
     return data_iter
 
 
-class MonoDataset(Dataset):
-    """Defines a dataset for machine translation without targets."""
+def _read_data_file(path: str, exts: Tuple[str, Union[str, None]],
+                    tokenize: Callable, lowercase: bool, max_len: int = -1) \
+        -> Tuple[List[List[str]], List[List[str]]]:
+    """
+    Read data files
+    :param path: data file path
+    :param exts: pair of file extensions
+    :param tokenize: tokenize function
+    :param lowercase: whether to lowercase or not
+    :param max_len: maximum length (longer instances will be filtered out)
+    :return: pair of tokenized sentence lists
+    """
+    src_doc = Path(f'{path}.{exts[0]}').read_text().strip().split('\n')
+    trg_doc = []
+    if exts[1]:
+        trg_doc = Path(f'{path}.{exts[1]}').read_text().strip().split('\n')
+        assert len(src_doc) == len(trg_doc)
 
-    @staticmethod
-    def sort_key(ex):
-        return len(ex.src)
+    src_tok, trg_tok = [], []
+    invalid = 0
+    for i, (s, t) in enumerate(zip_longest(src_doc, trg_doc)):
+        src = tokenize(s.strip().lower() if lowercase else s.strip())
+        if t: # parallel dataset
+            trg = tokenize(t.strip().lower() if lowercase else t.strip())
+            if (max_len < 0) or (len(src) <= max_len and len(trg) <= max_len):
+                src_tok.append(src)
+                trg_tok.append(trg)
+            else:
+                invalid += 1
+                logger.debug('Instance in line %d is too long. '
+                             'Exclude:\t%s\t%s', i, s, t)
+        else: # mono-lingual dataset
+            if max_len < 0 or len(src) <= max_len:
+                src_tok.append(src)
+            else:
+                invalid += 1
+                logger.debug('Instance in line %d is too long. '
+                             'Exclude:\t%s', i, s)
+    if invalid > 0:
+        logger.debug("\t%d instances were filtered out.", invalid)
+    return src_tok, trg_tok
 
-    def __init__(self, path: str, ext: str, field: Field, **kwargs) -> None:
+
+class TranslationDataset(Dataset):
+    """
+    TranslationDataset which stores raw sentence pairs (tokenized)
+    """
+    def __init__(self, src, trg=None):
+        if isinstance(trg, list) and len(trg) == 0:
+            trg = None
+        if trg is not None:
+            assert len(src) == len(trg)
+        self.src = src
+        self.trg = trg
+
+    def token_batch_size_fn(self, idx) -> int:
         """
-        Create a monolingual dataset (=only sources) given path and field.
-
-        :param path: Prefix of path to the data file
-        :param ext: Containing the extension to path for this language.
-        :param field: Containing the fields that will be used for data.
-        :param kwargs: Passed to the constructor of data.Dataset.
+        count num of tokens
+        (used for shaping minibatch based on token count)
+        :param idx:
+        :return: length
         """
+        length = len(self.src[idx]) + 2 # +2 because of EOS_TOKEN and BOS_TOKEN
+        if self.trg:
+            length = max(length, len(self.trg[idx]) + 2)
+        return length
 
-        fields = [('src', field)]
+    def __getitem__(self, idx: int) -> Tuple[List[str], List[str]]:
+        """
+        raise a raw instance
+        :param idx: index
+        :return: pair of tokenized sentences
+        """
+        src = self.src[idx]
+        trg = self.trg[idx] if self.trg else None
+        return src, trg
 
-        if hasattr(path, "readline"):  # special usage: stdin
-            src_file = path
-        else:
-            src_path = os.path.expanduser(path + ext)
-            src_file = open(src_path)
+    def __len__(self):
+        return len(self.src)
 
-        examples = []
-        for src_line in src_file:
-            src_line = src_line.strip()
-            if src_line != '':
-                examples.append(data.Example.fromlist(
-                    [src_line], fields))
+    def __repr__(self):
+        return "%s(len(src)=%s, len(trg)=%s)" % (self.__class__.__name__,
+            len(self.src), len(self.trg) if self.trg else 0)
 
-        src_file.close()
 
-        super().__init__(examples, fields, **kwargs)
+class TokenBatchSampler(BatchSampler):
+    """
+    Wraps another sampler to yield a mini-batch of indices
+    based on num of tokens (incl. padding).
+    * no bucketing implemented
+
+    :param sampler: Base sampler. Can be any iterable object
+    :param batch_size: Size of mini-batch.
+    :param drop_last: If ``True``, the sampler will drop the last batch if
+            its size would be less than ``batch_size``
+    """
+
+    def __init__(self, sampler: Sampler, batch_size: int, drop_last: bool):
+        super().__init__(sampler, batch_size, drop_last)
+
+    def __iter__(self):
+        batch = []
+        max_len = 0
+        for idx in self.sampler:
+            batch.append(idx)
+            n_tokens = self.sampler.data_source.token_batch_size_fn(idx)
+            if max_len < n_tokens:
+                max_len = n_tokens
+            if max_len * len(batch) >= self.batch_size:
+                yield batch
+                batch = []
+                max_len = 0
+        if len(batch) > 0 and not self.drop_last:
+            yield batch
+
+    def __len__(self):
+        raise NotImplementedError

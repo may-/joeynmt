@@ -6,10 +6,11 @@ import os
 import sys
 from typing import List, Optional
 import logging
+import pathos
 import numpy as np
 
 import torch
-from torchtext.data import Dataset, Field
+from torch.utils.data import Dataset
 
 from joeynmt.helpers import bpe_postprocess, load_config, make_logger,\
     get_latest_checkpoint, load_checkpoint, store_attention_plots
@@ -17,8 +18,8 @@ from joeynmt.metrics import bleu, chrf, token_accuracy, sequence_accuracy
 from joeynmt.model import build_model, Model, _DataParallel
 from joeynmt.search import run_batch
 from joeynmt.batch import Batch
-from joeynmt.data import load_data, make_data_iter, MonoDataset
-from joeynmt.constants import UNK_TOKEN, PAD_TOKEN, EOS_TOKEN
+from joeynmt.data import load_data, make_data_iter, TranslationDataset, \
+    _read_data_file
 from joeynmt.vocabulary import Vocabulary
 
 logger = logging.getLogger(__name__)
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 # pylint: disable=too-many-arguments,too-many-locals,no-member
 def validate_on_data(model: Model, data: Dataset,
                      batch_size: int,
-                     use_cuda: bool, max_output_length: int,
+                     device: torch.device, max_output_length: int,
                      level: str, eval_metric: Optional[str],
                      n_gpu: int,
                      batch_class: Batch = Batch,
@@ -48,7 +49,7 @@ def validate_on_data(model: Model, data: Dataset,
     :param data: dataset for validation
     :param batch_size: validation batch size
     :param batch_class: class type of batch
-    :param use_cuda: if True, use CUDA
+    :param device: cpu or gpu
     :param max_output_length: maximum length for generated hypotheses
     :param level: segmentation level, one of "char", "bpe", "word"
     :param eval_metric: evaluation metric, e.g. "bleu"
@@ -84,13 +85,18 @@ def validate_on_data(model: Model, data: Dataset,
             "this? 'batch_size' is > 1000 for sentence-batching. "
             "Consider decreasing it or switching to"
             " 'eval_batch_type: token'.")
+
+    # caution: batch_size divided by beam_size, because a batch will be expanded
+    # to batch_size*beam_size, and it could cause an out-of-memory error.
     valid_iter = make_data_iter(
-        dataset=data, batch_size=batch_size, batch_type=batch_type,
-        shuffle=False, train=False)
+        dataset=data, src_vocab=model.src_vocab, trg_vocab=model.trg_vocab,
+        batch_class=batch_class, batch_size=batch_size//beam_size,
+        batch_type=batch_type, shuffle=False)
     valid_sources_raw = data.src
-    pad_index = model.src_vocab.stoi[PAD_TOKEN]
+
     # disable dropout
     model.eval()
+
     # don't track gradients during validation
     with torch.no_grad():
         all_outputs = []
@@ -98,14 +104,12 @@ def validate_on_data(model: Model, data: Dataset,
         total_loss = 0
         total_ntokens = 0
         total_nseqs = 0
-        for valid_batch in iter(valid_iter):
-            # run as during training to get validation loss (e.g. xent)
-
-            batch = batch_class(valid_batch, pad_index, use_cuda=use_cuda)
+        for batch in valid_iter:
             # sort batch now by src length and keep track of order
             sort_reverse_index = batch.sort_by_src_length()
+            batch.make_cuda(device)
 
-            # run as during training with teacher forcing
+            # run as during training to get validation loss (e.g. xent)
             if compute_loss and batch.trg is not None:
                 batch_loss, _, _, _ = model(return_type="loss", **vars(batch))
                 if n_gpu > 1:
@@ -201,10 +205,8 @@ def parse_test_args(cfg, mode="test"):
     device = torch.device("cuda" if use_cuda else "cpu")
     if mode == 'test':
         n_gpu = torch.cuda.device_count() if use_cuda else 0
-        k = cfg["testing"].get("beam_size", 1)
-        batch_per_device = batch_size*k // n_gpu if n_gpu > 1 else batch_size*k
-        logger.info("Process device: %s, n_gpu: %d, "
-                    "batch_size per device: %d (with beam_size)",
+        batch_per_device = batch_size // n_gpu if n_gpu > 1 else batch_size
+        logger.info("Process device: %s, n_gpu: %d, batch_size per device: %d",
                     device, n_gpu, batch_per_device)
         eval_metric = cfg["training"]["eval_metric"]
 
@@ -219,7 +221,7 @@ def parse_test_args(cfg, mode="test"):
 
     # whether to use beam search for decoding, 0: greedy decoding
     if "testing" in cfg.keys():
-        beam_size = cfg["testing"].get("beam_size", 1)
+        beam_size = cfg["testing"].get("beam_size", 1) # positive integer only
         beam_alpha = cfg["testing"].get("alpha", -1)
         postprocess = cfg["testing"].get("postprocess", True)
         bpe_type = cfg["testing"].get("bpe_type", "subword-nmt")
@@ -272,14 +274,6 @@ def test(cfg_file,
     if len(logger.handlers) == 0:
         _ = make_logger(model_dir, mode="test")   # version string returned
 
-    # when checkpoint is not specified, take latest (best) from model dir
-    if ckpt is None:
-        ckpt = get_latest_checkpoint(model_dir)
-        try:
-            step = os.path.split(ckpt)[1].split(".ckpt")[0]
-        except IndexError:
-            step = "best"
-
     # load the data
     if datasets is None:
         _, dev_data, test_data, src_vocab, trg_vocab = load_data(
@@ -296,11 +290,18 @@ def test(cfg_file,
         bpe_type, sacrebleu, decoding_description, tokenizer_info \
         = parse_test_args(cfg, mode="test")
 
-    # load model state from disk
-    model_checkpoint = load_checkpoint(ckpt, use_cuda=use_cuda)
-
     # build model and load parameters into it
     model = build_model(cfg["model"], src_vocab=src_vocab, trg_vocab=trg_vocab)
+
+    # when checkpoint is not specified, take latest (best) from model dir
+    if ckpt is None:
+        ckpt = get_latest_checkpoint(model_dir)
+        try:
+            step = os.path.split(ckpt)[1].split(".ckpt")[0]
+        except IndexError:
+            step = "best"
+    # load model state from disk
+    model_checkpoint = load_checkpoint(ckpt, device=device)
     model.load_state_dict(model_checkpoint["model_state"])
     logger.info("Load model_state from %s.", ckpt)
 
@@ -315,7 +316,7 @@ def test(cfg_file,
         if data_set is None:
             continue
 
-        dataset_file = cfg["data"][data_set_name] + "." + cfg["data"]["trg"]
+        dataset_file = f'{cfg["data"][data_set_name]}.{cfg["data"]["src"]}'
         logger.info("Decoding on %s set (%s)...", data_set_name, dataset_file)
 
         #pylint: disable=unused-variable
@@ -324,12 +325,12 @@ def test(cfg_file,
             model, data=data_set, batch_size=batch_size,
             batch_class=Batch, batch_type=batch_type, level=level,
             max_output_length=max_output_length, eval_metric=eval_metric,
-            use_cuda=use_cuda, compute_loss=False, beam_size=beam_size,
+            device=device, compute_loss=False, beam_size=beam_size,
             beam_alpha=beam_alpha, postprocess=postprocess,
             bpe_type=bpe_type, sacrebleu=sacrebleu, n_gpu=n_gpu)
         #pylint: enable=unused-variable
 
-        if "trg" in data_set.fields:
+        if data_set.trg is not None:
             logger.info("%4s %s%s: %6.2f [%s]",
                         data_set_name, eval_metric, tokenizer_info,
                         score, decoding_description)
@@ -339,7 +340,7 @@ def test(cfg_file,
 
         if save_attention:
             if attention_scores:
-                attention_name = "{}.{}.att".format(data_set_name, step)
+                attention_name = f"{data_set_name}.{step}.att"
                 attention_path = os.path.join(model_dir, attention_name)
                 logger.info("Saving attention plots. This might take a while..")
                 store_attention_plots(attentions=attention_scores,
@@ -355,10 +356,10 @@ def test(cfg_file,
                                "Set beam_size to 1 for greedy decoding.")
 
         if output_path is not None:
-            output_path_set = "{}.{}".format(output_path, data_set_name)
+            output_path_set = f"{output_path}.{data_set_name}.hyp"
             with open(output_path_set, mode="w", encoding="utf-8") as out_file:
                 for hyp in hypotheses:
-                    out_file.write(hyp + "\n")
+                    out_file.write(f"{hyp}\n")
             logger.info("Translations saved to: %s", output_path_set)
 
 
@@ -377,25 +378,6 @@ def translate(cfg_file: str,
     :param ckpt: path to checkpoint to load
     :param output_path: path to output file
     """
-
-    def _load_line_as_data(line):
-        """ Create a dataset from one line via a temporary file. """
-        # write src input to temporary file
-        tmp_name = "tmp"
-        tmp_suffix = ".src"
-        tmp_filename = tmp_name+tmp_suffix
-        with open(tmp_filename, "w") as tmp_file:
-            tmp_file.write("{}\n".format(line))
-
-        test_data = MonoDataset(path=tmp_name, ext=tmp_suffix,
-                                field=src_field)
-
-        # remove temporary file
-        if os.path.exists(tmp_filename):
-            os.remove(tmp_filename)
-
-        return test_data
-
     def _translate_data(test_data):
         """ Translates given dataset, using parameters from outer scope. """
         # pylint: disable=unused-variable
@@ -404,7 +386,7 @@ def translate(cfg_file: str,
             model, data=test_data, batch_size=batch_size,
             batch_class=Batch, batch_type=batch_type, level=level,
             max_output_length=max_output_length, eval_metric="",
-            use_cuda=use_cuda, compute_loss=False, beam_size=beam_size,
+            device=device, compute_loss=False, beam_size=beam_size,
             beam_alpha=beam_alpha, postprocess=postprocess,
             bpe_type=bpe_type, sacrebleu=sacrebleu, n_gpu=n_gpu)
         return hypotheses
@@ -428,17 +410,12 @@ def translate(cfg_file: str,
     trg_vocab = Vocabulary(file=trg_vocab_file)
 
     data_cfg = cfg["data"]
+    src_lang = data_cfg["src"]
     level = data_cfg["level"]
     lowercase = data_cfg["lowercase"]
+    test_path = data_cfg.get("test", None)
 
     tok_fun = lambda s: list(s) if level == "char" else s.split()
-
-    src_field = Field(init_token=None, eos_token=EOS_TOKEN,
-                      pad_token=PAD_TOKEN, tokenize=tok_fun,
-                      batch_first=True, lower=lowercase,
-                      unk_token=UNK_TOKEN,
-                      include_lengths=True)
-    src_field.vocab = src_vocab
 
     # parse test args
     batch_size, batch_type, use_cuda, device, n_gpu, level, _, \
@@ -446,7 +423,7 @@ def translate(cfg_file: str,
         bpe_type, sacrebleu, _, _ = parse_test_args(cfg, mode="translate")
 
     # load model state from disk
-    model_checkpoint = load_checkpoint(ckpt, use_cuda=use_cuda)
+    model_checkpoint = load_checkpoint(ckpt, device=device)
 
     # build model and load parameters into it
     model = build_model(cfg["model"], src_vocab=src_vocab, trg_vocab=trg_vocab)
@@ -458,15 +435,18 @@ def translate(cfg_file: str,
 
     if not sys.stdin.isatty():
         # input file given
-        test_data = MonoDataset(path=sys.stdin, ext="", field=src_field)
+        assert test_path is not None, "Test file is not given."
+        test_src, _ = _read_data_file(test_path, (src_lang, None),
+                                      tok_fun, lowercase)
+        test_data = TranslationDataset(test_src)
         hypotheses = _translate_data(test_data)
 
         if output_path is not None:
             # write to outputfile if given
-            output_path_set = "{}".format(output_path)
+            output_path_set = f"{output_path}.hyp"
             with open(output_path_set, mode="w", encoding="utf-8") as out_file:
                 for hyp in hypotheses:
-                    out_file.write(hyp + "\n")
+                    out_file.write(f"{hyp}\n")
             logger.info("Translations saved to: %s.", output_path_set)
         else:
             # print to stdout
@@ -485,8 +465,7 @@ def translate(cfg_file: str,
                     break
 
                 # every line has to be made into dataset
-                test_data = _load_line_as_data(line=src_input)
-
+                test_data = TranslationDataset([tok_fun(src_input)])
                 hypotheses = _translate_data(test_data)
                 print("JoeyNMT: {}".format(hypotheses[0]))
 

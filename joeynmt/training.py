@@ -41,15 +41,14 @@ try:
 except ImportError as no_apex:
     logger.debug(no_apex)
     # error handling in TrainManager object construction
-    pass
+    #pass # pylint: disable=unnecessary-pass
+    
 
-
-# pylint: disable=too-many-instance-attributes
 class TrainManager:
     """ Manages training loop, validations, learning rate scheduling
     and early stopping."""
+    # pylint: disable=too-many-instance-attributes
 
-    # pylint: disable=too-many-statements
     def __init__(self, model: Model, config: dict,
                  batch_class: Batch = Batch) -> None:
         """
@@ -59,6 +58,7 @@ class TrainManager:
         :param config: dictionary containing the training configurations
         :param batch_class: batch class to encapsulate the torch class
         """
+        # pylint: disable=too-many-statements,too-many-branches
         train_config = config["training"]
         self.batch_class = batch_class
 
@@ -356,9 +356,6 @@ class TrainManager:
         if self.fp16 and model_checkpoint.get("amp_state", None) is not None:
             amp.load_state_dict(model_checkpoint['amp_state'])
 
-    # pylint: disable=unnecessary-comprehension
-    # pylint: disable=too-many-branches
-    # pylint: disable=too-many-statements
     def train_and_validate(self, train_data: Dataset, valid_data: Dataset) \
             -> None:
         """
@@ -367,6 +364,9 @@ class TrainManager:
         :param train_data: training data
         :param valid_data: validation data
         """
+        # pylint: disable=unnecessary-comprehension
+        # pylint: disable=too-many-branches
+        # pylint: disable=too-many-statements
         self.train_iter = make_data_iter(train_data,
                                          src_vocab=self.model.src_vocab,
                                          trg_vocab=self.model.trg_vocab,
@@ -405,6 +405,7 @@ class TrainManager:
         #     # leftovers are just ignored.
         #################################################################
 
+        # pylint: disable=logging-too-many-args
         logger.info(
             "Train stats:\n"
             "\tdevice: %s\n"
@@ -417,6 +418,7 @@ class TrainManager:
             self.n_gpu, self.fp16, self.batch_multiplier,
             self.batch_size // self.n_gpu if self.n_gpu > 1 else self.batch_size,
             self.batch_size * self.batch_multiplier, self.num_workers)
+        # pylint: enable=logging-too-many-args
 
         for epoch_no in range(self.epochs):
             logger.info("EPOCH %d", epoch_no + 1)
@@ -622,7 +624,7 @@ class TrainManager:
                          eval_metric=self.eval_metric,
                          new_best=new_best)
 
-        self._log_examples(sources_raw=[v for v in valid_sources_raw],
+        self._log_examples(sources_raw=valid_sources_raw,
                            sources=valid_sources,
                            hypotheses_raw=valid_hypotheses_raw,
                            hypotheses=valid_hypotheses,
@@ -642,7 +644,7 @@ class TrainManager:
         if valid_attention_scores:
             store_attention_plots(attentions=valid_attention_scores,
                                   targets=valid_hypotheses_raw,
-                                  sources=[s for s in valid_data.src],
+                                  sources=valid_data.src,
                                   indices=self.log_valid_sents,
                                   output_prefix=os.path.join(
                                   self.model_dir, f"att.{self.stats.steps}"),

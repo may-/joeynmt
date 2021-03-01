@@ -15,12 +15,11 @@ from joeynmt.transformer_layers import PositionalEncoding, \
     TransformerDecoderLayer
 
 
-# pylint: disable=abstract-method
 class Decoder(nn.Module):
     """
     Base decoder class
     """
-
+    # pylint: disable=abstract-method
     @property
     def output_size(self):
         """
@@ -31,11 +30,10 @@ class Decoder(nn.Module):
         return self._output_size
 
 
-# pylint: disable=arguments-differ,too-many-arguments
-# pylint: disable=too-many-instance-attributes, unused-argument
 class RecurrentDecoder(Decoder):
     """A conditional RNN decoder with attention."""
-
+    # pylint: disable=too-many-arguments,unused-argument
+    # pylint: disable=too-many-instance-attributes
     def __init__(self,
                  rnn_type: str = "gru",
                  emb_size: int = 0,
@@ -454,14 +452,13 @@ class RecurrentDecoder(Decoder):
                                              self.rnn, self.attention)
 
 
-# pylint: disable=arguments-differ,too-many-arguments
-# pylint: disable=too-many-instance-attributes, unused-argument
 class TransformerDecoder(Decoder):
     """
     A transformer decoder with N masked layers.
     Decoder layers are masked so that an attention head cannot see the future.
     """
-
+    # pylint: disable=too-many-arguments,unused-argument
+    # pylint: disable=too-many-instance-attributes
     def __init__(self,
                  num_layers: int = 4,
                  num_heads: int = 8,

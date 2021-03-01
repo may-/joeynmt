@@ -45,12 +45,10 @@ class XentLoss(nn.Module):
         # masking out padding area (sum of probabilities for padding area = 0)
         padding_positions = torch.nonzero(targets.data == self.pad_index,
             as_tuple=False)
-        # pylint: disable=len-as-condition
         if len(padding_positions) > 0:
             smooth_dist.index_fill_(0, padding_positions.squeeze(), 0.0)
         return Variable(smooth_dist, requires_grad=False)
 
-    # pylint: disable=arguments-differ
     def forward(self, log_probs, targets):
         """
         Compute the cross-entropy between logits and targets.

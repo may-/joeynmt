@@ -15,11 +15,9 @@ logger = logging.getLogger(__name__)
 
 
 class Embeddings(nn.Module):
-
     """
     Simple embeddings class
     """
-
     # pylint: disable=unused-argument
     def __init__(self,
                  embedding_dim: int = 64,
@@ -49,7 +47,6 @@ class Embeddings(nn.Module):
         if freeze:
             freeze_params(self)
 
-    # pylint: disable=arguments-differ
     def forward(self, x: Tensor) -> Tensor:
         """
         Perform lookup for input `x` in the embedding table.

@@ -107,7 +107,6 @@ class Model(nn.Module):
 
         return return_tuple
 
-    # pylint: disable=arguments-differ
     def _encode_decode(self, src: Tensor, trg_input: Tensor, src_mask: Tensor,
                        src_length: Tensor, trg_mask: Tensor = None, **kwargs) \
             -> (Tensor, Tensor, Tensor, Tensor):

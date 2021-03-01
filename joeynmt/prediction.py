@@ -6,7 +6,6 @@ import os
 import sys
 from typing import List, Optional
 import logging
-import pathos
 import numpy as np
 
 import torch
@@ -25,7 +24,6 @@ from joeynmt.vocabulary import Vocabulary
 logger = logging.getLogger(__name__)
 
 
-# pylint: disable=too-many-arguments,too-many-locals,no-member
 def validate_on_data(model: Model, data: Dataset,
                      batch_size: int,
                      device: torch.device, max_output_length: int,
@@ -76,6 +74,7 @@ def validate_on_data(model: Model, data: Dataset,
         - decoded_valid: raw validation hypotheses (before post-processing),
         - valid_attention_scores: attention scores for validation hypotheses
     """
+    # pylint: disable=too-many-arguments,too-many-locals,no-member
     assert batch_size >= n_gpu, "batch_size must be bigger than n_gpu."
     if sacrebleu is None:   # assign default value
         sacrebleu = {"remove_whitespace": True, "tokenize": "13a"}
@@ -251,7 +250,6 @@ def parse_test_args(cfg, mode="test"):
            tokenizer_info
 
 
-# pylint: disable-msg=logging-too-many-args
 def test(cfg_file,
          ckpt: str,
          output_path: str = None,
@@ -267,7 +265,7 @@ def test(cfg_file,
     :param datasets: datasets to predict
     :param save_attention: whether to save the computed attention weights
     """
-
+    # pylint: disable=logging-too-many-args
     cfg = load_config(cfg_file)
     model_dir = cfg["training"]["model_dir"]
 

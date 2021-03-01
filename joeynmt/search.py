@@ -66,8 +66,7 @@ def recurrent_greedy(
     prev_att_vector = None
     finished = src_mask.new_zeros((batch_size, 1)).byte()
 
-    # pylint: disable=unused-variable
-    for t in range(max_output_length):
+    for t in range(max_output_length): # pylint: disable=unused-variable
         # decode one single step
         with torch.no_grad():
             logits, hidden, att_probs, prev_att_vector = model(
@@ -100,7 +99,6 @@ def recurrent_greedy(
     return stacked_output, stacked_attention_scores
 
 
-# pylint: disable=unused-argument
 def transformer_greedy(
         src_mask: Tensor, max_output_length: int, model: Model,
         encoder_output: Tensor, encoder_hidden: Tensor) -> (np.array, None):
@@ -117,6 +115,7 @@ def transformer_greedy(
         - stacked_output: output hypotheses (2d array of indices),
         - stacked_attention_scores: attention scores (3d array)
     """
+    # pylint: disable=unused-argument
     bos_index = model.bos_index
     eos_index = model.eos_index
     batch_size = src_mask.size(0)
@@ -162,7 +161,6 @@ def transformer_greedy(
     return ys.detach().cpu().numpy(), None
 
 
-# pylint: disable=too-many-statements,too-many-branches
 def beam_search(model: Model, size: int,
                 encoder_output: Tensor, encoder_hidden: Tensor,
                 src_mask: Tensor, max_output_length: int,
@@ -185,6 +183,7 @@ def beam_search(model: Model, size: int,
         - stacked_output: output hypotheses (2d array of indices),
         - stacked_attention_scores: attention scores (3d array)
     """
+    # pylint: disable=too-many-statements,too-many-branches
     assert size > 0, 'Beam size must be >0.'
     assert n_best <= size, 'Can only return {} best hypotheses.'.format(size)
 
@@ -201,8 +200,8 @@ def beam_search(model: Model, size: int,
     trg_mask = None     # not used for RNN
 
     # Recurrent models only: initialize RNN hidden state
-    # pylint: disable=protected-access
     if not transformer:
+        # pylint: disable=protected-access
         # tile encoder states and decoder initial states beam_size times
         hidden = model.decoder._init_hidden(encoder_hidden)
         hidden = tile(hidden, size, dim=1)  # layers x batch*k x dec_hidden_size
@@ -265,8 +264,8 @@ def beam_search(model: Model, size: int,
         # expand current hypotheses
         # decode one single step
         # logits: logits for final softmax
-        # pylint: disable=unused-variable
         with torch.no_grad():
+            # pylint: disable=unused-variable
             logits, hidden, att_scores, att_vectors = model(
                 return_type="decode",
                 encoder_output=encoder_output,
@@ -362,7 +361,6 @@ def beam_search(model: Model, size: int,
             non_finished = end_condition.eq(False).nonzero(
                 as_tuple=False).view(-1)
             # if all sentences are translated, no need to go further
-            # pylint: disable=len-as-condition
             if len(non_finished) == 0:
                 break
             # remove finished batches for the next step

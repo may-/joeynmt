@@ -6,7 +6,6 @@ import torch.nn as nn
 from torch import Tensor
 
 
-# pylint: disable=arguments-differ
 class MultiHeadedAttention(nn.Module):
     """
     Multi-Head Attention module from "Attention is All You Need"
@@ -14,7 +13,6 @@ class MultiHeadedAttention(nn.Module):
     Implementation modified from OpenNMT-py.
     https://github.com/OpenNMT/OpenNMT-py
     """
-
     def __init__(self, num_heads: int, size: int, dropout: float = 0.1):
         """
         Create a multi-headed attention layer.
@@ -87,13 +85,11 @@ class MultiHeadedAttention(nn.Module):
         return output
 
 
-# pylint: disable=arguments-differ
 class PositionwiseFeedForward(nn.Module):
     """
     Position-wise Feed-forward layer
     Projects to ff_size and then back down to input_size.
     """
-
     def __init__(self, input_size, ff_size, dropout=0.1):
         """
         Initializes position-wise feed-forward layer.
@@ -116,7 +112,6 @@ class PositionwiseFeedForward(nn.Module):
         return self.pwff_layer(x_norm) + x
 
 
-# pylint: disable=arguments-differ
 class PositionalEncoding(nn.Module):
     """
     Pre-compute position encodings (PE).
@@ -187,7 +182,6 @@ class TransformerEncoderLayer(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.size = size
 
-    # pylint: disable=arguments-differ
     def forward(self, x: Tensor, mask: Tensor) -> Tensor:
         """
         Forward pass for a single transformer encoder layer.
@@ -244,7 +238,6 @@ class TransformerDecoderLayer(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
 
-    # pylint: disable=arguments-differ
     def forward(self,
                 x: Tensor = None,
                 memory: Tensor = None,

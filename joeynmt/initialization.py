@@ -56,7 +56,6 @@ def xavier_uniform_n_(w: Tensor, gain: float = 1., n: int = 4) -> None:
         nn.init.uniform_(w, -a, a)
 
 
-# pylint: disable=too-many-branches
 def initialize_model(model: nn.Module, cfg: dict, src_padding_idx: int,
                      trg_padding_idx: int) -> None:
     """
@@ -95,6 +94,7 @@ def initialize_model(model: nn.Module, cfg: dict, src_padding_idx: int,
     :param src_padding_idx: index of source padding token
     :param trg_padding_idx: index of target padding token
     """
+    # pylint: disable=too-many-branches
 
     # defaults: xavier, embeddings: normal 0.01, biases: zeros, no orthogonal
     gain = float(cfg.get("init_gain", 1.0))  # for xavier
@@ -108,8 +108,8 @@ def initialize_model(model: nn.Module, cfg: dict, src_padding_idx: int,
     bias_init = cfg.get("bias_initializer", "zeros")
     bias_init_weight = float(cfg.get("bias_init_weight", 0.01))
 
-    # pylint: disable=unnecessary-lambda, no-else-return
     def _parse_init(s, scale, _gain):
+        # pylint: disable=unnecessary-lambda, no-else-return
         scale = float(scale)
         assert scale > 0., "incorrect init_weight"
         if s.lower() == "xavier":

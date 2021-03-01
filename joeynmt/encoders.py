@@ -10,11 +10,11 @@ from joeynmt.transformer_layers import \
     TransformerEncoderLayer, PositionalEncoding
 
 
-#pylint: disable=abstract-method
 class Encoder(nn.Module):
     """
     Base encoder class
     """
+    #pylint: disable=abstract-method
     @property
     def output_size(self):
         """
@@ -69,7 +69,6 @@ class RecurrentEncoder(Encoder):
         if freeze:
             freeze_params(self)
 
-    #pylint: disable=invalid-name, unused-argument
     def _check_shapes_input_forward(self, embed_src: Tensor, src_length: Tensor,
                                     mask: Tensor) -> None:
         """
@@ -80,12 +79,12 @@ class RecurrentEncoder(Encoder):
         :param src_length: source length
         :param mask: source mask
         """
+        #pylint: disable=invalid-name, unused-argument
         assert embed_src.shape[0] == src_length.shape[0]
         assert embed_src.shape[2] == self.emb_size
         #assert mask.shape == embed_src.shape
         assert len(src_length.shape) == 1
 
-    #pylint: disable=arguments-differ
     def forward(self, embed_src: Tensor, src_length: Tensor, mask: Tensor,
                 **kwargs) -> (Tensor, Tensor):
         """
@@ -105,6 +104,7 @@ class RecurrentEncoder(Encoder):
             - hidden_concat: last hidden state with
                 shape (batch_size, directions*hidden)
         """
+        #pylint: disable=arguments-differ
         self._check_shapes_input_forward(embed_src=embed_src,
                                          src_length=src_length,
                                          mask=mask)
@@ -117,9 +117,8 @@ class RecurrentEncoder(Encoder):
                                       batch_first=True)
         output, hidden = self.rnn(packed)
 
-        #pylint: disable=unused-variable
         if isinstance(hidden, tuple):
-            hidden, memory_cell = hidden
+            hidden, memory_cell = hidden #pylint: disable=unused-variable
 
         output, _ = pad_packed_sequence(output, batch_first=True,
                                         total_length=total_length)
@@ -138,7 +137,6 @@ class RecurrentEncoder(Encoder):
         bwd_hidden_last = hidden_layerwise[-1:, 1]
 
         # only feed the final state of the top-most layer to the decoder
-        #pylint: disable=no-member
         hidden_concat = torch.cat(
             [fwd_hidden_last, bwd_hidden_last], dim=2).squeeze(0)
         # final: batch x directions*hidden
@@ -153,7 +151,6 @@ class TransformerEncoder(Encoder):
     Transformer Encoder
     """
 
-    #pylint: disable=unused-argument
     def __init__(self,
                  hidden_size: int = 512,
                  ff_size: int = 2048,
@@ -175,6 +172,7 @@ class TransformerEncoder(Encoder):
         :param freeze: freeze the parameters of the encoder during training
         :param kwargs:
         """
+        #pylint: disable=unused-argument
         super().__init__()
 
         # build all (num_layers) layers
@@ -192,7 +190,6 @@ class TransformerEncoder(Encoder):
         if freeze:
             freeze_params(self)
 
-    #pylint: disable=arguments-differ
     def forward(self,
                 embed_src: Tensor,
                 src_length: Tensor,
@@ -215,6 +212,7 @@ class TransformerEncoder(Encoder):
             - hidden_concat: last hidden state with
                 shape (batch_size, directions*hidden)
         """
+        #pylint: disable=unused-argument
         x = self.pe(embed_src)  # add position encoding to word embeddings
         x = self.emb_dropout(x)
 

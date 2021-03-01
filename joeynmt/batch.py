@@ -9,7 +9,6 @@ class Batch:
     """Object for holding a batch of data with mask during training.
     Input is a batch from a torch text iterator.
     """
-    # pylint: disable=too-many-instance-attributes
     def __init__(self, src, src_length, trg, trg_length, pad_index):
         """
         Create a new joey batch from a torch batch.
@@ -23,6 +22,7 @@ class Batch:
         :param trg_length:
         :param pad_index:
         """
+        # pylint: disable=too-many-instance-attributes
         self.src = src
         self.src_length = src_length
         self.src_mask = (self.src != pad_index).unsqueeze(1)

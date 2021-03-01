@@ -240,8 +240,7 @@ def store_attention_plots(attentions: np.array,
                 tb_writer.add_figure("attention/{}.".format(i),
                                      fig,
                                      global_step=steps)
-        # pylint: disable=bare-except
-        except:
+        except: # pylint: disable=bare-except
             print("Couldn't plot example {}: src len {}, trg len {}, "
                   "attention scores shape {}".format(i, len(src), len(trg),
                                                      attention_scores.shape))

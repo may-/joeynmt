@@ -43,7 +43,6 @@ class BahdanauAttention(AttentionMechanism):
         self.proj_keys = None   # to store projected keys
         self.proj_query = None  # projected query
 
-    #pylint: disable=arguments-differ
     def forward(self, query: Tensor = None,
                 mask: Tensor = None,
                 values: Tensor = None):
@@ -59,6 +58,7 @@ class BahdanauAttention(AttentionMechanism):
         :return: context vector of shape (batch_size, 1, value_size),
             attention probabilities of shape (batch_size, 1, src_length)
         """
+        # pylint: disable=arguments-differ
         self._check_input_shapes_forward(query=query, mask=mask, values=values)
 
         assert mask is not None, "mask is required"
@@ -152,7 +152,6 @@ class LuongAttention(AttentionMechanism):
                                    bias=False)
         self.proj_keys = None  # projected keys
 
-    # pylint: disable=arguments-differ
     def forward(self, query: torch.Tensor = None,
                 mask: torch.Tensor = None,
                 values: torch.Tensor = None):
@@ -170,6 +169,7 @@ class LuongAttention(AttentionMechanism):
         :return: context vector of shape (batch_size, 1, value_size),
             attention probabilities of shape (batch_size, 1, src_length)
         """
+        # pylint: disable=arguments-differ
         self._check_input_shapes_forward(query=query, mask=mask, values=values)
 
         assert self.proj_keys is not None,\

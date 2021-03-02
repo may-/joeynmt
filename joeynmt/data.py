@@ -3,7 +3,6 @@
 Data module
 """
 import sys
-import os
 from pathlib import Path
 from itertools import zip_longest
 from typing import Optional, List, Tuple, Callable, Union
@@ -69,8 +68,8 @@ def load_data(data_cfg: dict, datasets: list = None)\
     train_data, train_src, train_trg = None, None, None
     if "train" in datasets and train_path is not None:
         logger.info("Loading training data...")
-        train_src, train_trg = _read_data_file(train_path, (src_lang, trg_lang),
-                                               tok_fun, lowercase, max_len)
+        train_src, train_trg = _read_data_file(
+            Path(train_path), (src_lang, trg_lang), tok_fun, lowercase, max_len)
 
         random_train_subset = data_cfg.get("random_train_subset", -1)
         if random_train_subset > -1:
@@ -90,6 +89,8 @@ def load_data(data_cfg: dict, datasets: list = None)\
 
     src_vocab_file = data_cfg.get("src_vocab", None)
     trg_vocab_file = data_cfg.get("trg_vocab", None)
+    src_vocab_file = None if src_vocab_file is None else Path(src_vocab_file)
+    trg_vocab_file = None if trg_vocab_file is None else Path(trg_vocab_file)
 
     assert (train_src is not None) or (src_vocab_file is not None)
     assert (train_trg is not None) or (trg_vocab_file is not None)
@@ -107,19 +108,19 @@ def load_data(data_cfg: dict, datasets: list = None)\
     dev_data = None
     if "dev" in datasets and dev_path is not None:
         logger.info("Loading dev data...")
-        dev_src, dev_trg = _read_data_file(dev_path, (src_lang, trg_lang),
-                                           tok_fun, lowercase)
+        dev_src, dev_trg = _read_data_file(
+            Path(dev_path), (src_lang, trg_lang), tok_fun, lowercase)
         dev_data = TranslationDataset(dev_src, dev_trg)
 
     test_data = None
     if "test" in datasets and test_path is not None:
         logger.info("Loading test data...")
         # check if target exists
-        if not os.path.isfile(f'{test_path}.{trg_lang}'):
+        if not Path(test_path).with_suffix(f'.{trg_lang}').is_file():
             # no target is given -> create dataset from src only
             trg_lang = None
-        test_src, test_trg = _read_data_file(test_path, (src_lang, trg_lang),
-                                             tok_fun, lowercase)
+        test_src, test_trg = _read_data_file(
+            Path(test_path), (src_lang, trg_lang), tok_fun, lowercase)
         test_data = TranslationDataset(test_src, test_trg)
 
     logger.info("Data loaded.")
@@ -190,7 +191,7 @@ def make_data_iter(dataset: Dataset,
     return data_iter
 
 
-def _read_data_file(path: str, exts: Tuple[str, Union[str, None]],
+def _read_data_file(path: Path, exts: Tuple[str, Union[str, None]],
                     tokenize: Callable, lowercase: bool, max_len: int = -1) \
         -> Tuple[List[List[str]], List[List[str]]]:
     """
@@ -202,10 +203,11 @@ def _read_data_file(path: str, exts: Tuple[str, Union[str, None]],
     :param max_len: maximum length (longer instances will be filtered out)
     :return: pair of tokenized sentence lists
     """
-    src_doc = Path(f'{path}.{exts[0]}').read_text().strip().split('\n')
+    s_lang, t_lang = exts
+    src_doc = path.with_suffix(f'.{s_lang}').read_text().strip().split('\n')
     trg_doc = []
-    if exts[1]:
-        trg_doc = Path(f'{path}.{exts[1]}').read_text().strip().split('\n')
+    if t_lang:
+        trg_doc = path.with_suffix(f'.{t_lang}').read_text().strip().split('\n')
         assert len(src_doc) == len(trg_doc)
 
     src_tok, trg_tok = [], []

@@ -2,7 +2,7 @@
 """
 This modules holds methods for generating predictions from a model.
 """
-import os
+from pathlib import Path
 import sys
 from typing import List, Optional
 import logging
@@ -266,8 +266,8 @@ def test(cfg_file,
     :param save_attention: whether to save the computed attention weights
     """
     # pylint: disable=logging-too-many-args
-    cfg = load_config(cfg_file)
-    model_dir = cfg["training"]["model_dir"]
+    cfg = load_config(Path(cfg_file))
+    model_dir = Path(cfg["training"]["model_dir"])
 
     if len(logger.handlers) == 0:
         _ = make_logger(model_dir, mode="test")   # version string returned
@@ -295,13 +295,13 @@ def test(cfg_file,
     if ckpt is None:
         ckpt = get_latest_checkpoint(model_dir)
         try:
-            step = os.path.split(ckpt)[1].split(".ckpt")[0]
+            step = ckpt.stem
         except IndexError:
             step = "best"
+
     # load model state from disk
-    model_checkpoint = load_checkpoint(ckpt, device=device)
+    model_checkpoint = load_checkpoint(Path(ckpt), device=device)
     model.load_state_dict(model_checkpoint["model_state"])
-    logger.info("Load model_state from %s.", ckpt)
 
     if use_cuda:
         model.to(device)
@@ -339,7 +339,7 @@ def test(cfg_file,
         if save_attention:
             if attention_scores:
                 attention_name = f"{data_set_name}.{step}.att"
-                attention_path = os.path.join(model_dir, attention_name)
+                attention_path = (model_dir / attention_name).as_posix()
                 logger.info("Saving attention plots. This might take a while..")
                 store_attention_plots(attentions=attention_scores,
                                       targets=hypotheses_raw,
@@ -354,8 +354,8 @@ def test(cfg_file,
                                "Set beam_size to 1 for greedy decoding.")
 
         if output_path is not None:
-            output_path_set = f"{output_path}.{data_set_name}.hyp"
-            with open(output_path_set, mode="w", encoding="utf-8") as out_file:
+            output_path_set = Path(f"{output_path}.{data_set_name}.hyp")
+            with output_path_set.open(mode="w", encoding="utf-8") as out_file:
                 for hyp in hypotheses:
                     out_file.write(f"{hyp}\n")
             logger.info("Translations saved to: %s", output_path_set)
@@ -389,8 +389,8 @@ def translate(cfg_file: str,
             bpe_type=bpe_type, sacrebleu=sacrebleu, n_gpu=n_gpu)
         return hypotheses
 
-    cfg = load_config(cfg_file)
-    model_dir = cfg["training"]["model_dir"]
+    cfg = load_config(Path(cfg_file))
+    model_dir = Path(cfg["training"]["model_dir"])
 
     _ = make_logger(model_dir, mode="translate")
     # version string returned
@@ -400,12 +400,10 @@ def translate(cfg_file: str,
         ckpt = get_latest_checkpoint(model_dir)
 
     # read vocabs
-    src_vocab_file = cfg["data"].get("src_vocab",
-                                     os.path.join(model_dir, "src_vocab.txt"))
-    trg_vocab_file = cfg["data"].get("trg_vocab",
-                                     os.path.join(model_dir, "trg_vocab.txt"))
-    src_vocab = Vocabulary(file=src_vocab_file)
-    trg_vocab = Vocabulary(file=trg_vocab_file)
+    src_vocab_file = cfg["data"].get("src_vocab", model_dir / "src_vocab.txt")
+    trg_vocab_file = cfg["data"].get("trg_vocab", model_dir / "trg_vocab.txt")
+    src_vocab = Vocabulary(file=Path(src_vocab_file))
+    trg_vocab = Vocabulary(file=Path(trg_vocab_file))
 
     data_cfg = cfg["data"]
     src_lang = data_cfg["src"]
@@ -420,13 +418,12 @@ def translate(cfg_file: str,
         max_output_length, beam_size, beam_alpha, postprocess, \
         bpe_type, sacrebleu, _, _ = parse_test_args(cfg, mode="translate")
 
-    # load model state from disk
-    model_checkpoint = load_checkpoint(ckpt, device=device)
-
     # build model and load parameters into it
     model = build_model(cfg["model"], src_vocab=src_vocab, trg_vocab=trg_vocab)
+
+    # load model state from disk
+    model_checkpoint = load_checkpoint(Path(ckpt), device=device)
     model.load_state_dict(model_checkpoint["model_state"])
-    logger.info("Load model_state from %s.", ckpt)
 
     if use_cuda:
         model.to(device)
@@ -434,15 +431,15 @@ def translate(cfg_file: str,
     if not sys.stdin.isatty():
         # input file given
         assert test_path is not None, "Test file is not given."
-        test_src, _ = _read_data_file(test_path, (src_lang, None),
+        test_src, _ = _read_data_file(Path(test_path), (src_lang, None),
                                       tok_fun, lowercase)
         test_data = TranslationDataset(test_src)
         hypotheses = _translate_data(test_data)
 
         if output_path is not None:
             # write to outputfile if given
-            output_path_set = f"{output_path}.hyp"
-            with open(output_path_set, mode="w", encoding="utf-8") as out_file:
+            output_path_set = Path(output_path).with_suffix(".hyp")
+            with output_path_set.open(mode="w", encoding="utf-8") as out_file:
                 for hyp in hypotheses:
                     out_file.write(f"{hyp}\n")
             logger.info("Translations saved to: %s.", output_path_set)

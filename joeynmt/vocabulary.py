@@ -6,6 +6,7 @@ Vocabulary module
 from collections import defaultdict, Counter
 import functools
 import operator
+from pathlib import Path
 
 from typing import List, Tuple
 import numpy as np
@@ -17,7 +18,7 @@ from joeynmt.constants import UNK_TOKEN, DEFAULT_UNK_ID, \
 class Vocabulary:
     """ Vocabulary represents mapping between tokens and indices. """
 
-    def __init__(self, tokens: List[str] = None, file: str = None) -> None:
+    def __init__(self, tokens: List[str] = None, file: Path = None) -> None:
         """
         Create vocabulary from list of tokens or file.
 
@@ -51,7 +52,7 @@ class Vocabulary:
         self.add_tokens(tokens=self.specials+tokens)
         assert len(self.stoi) == len(self.itos)
 
-    def _from_file(self, file: str) -> None:
+    def _from_file(self, file: Path) -> None:
         """
         Make vocabulary from contents of file.
         File format: token with index i is in line i.
@@ -59,7 +60,7 @@ class Vocabulary:
         :param file: path to file where the vocabulary is loaded from
         """
         tokens = []
-        with open(file, "r") as open_file:
+        with file.open("r") as open_file:
             for line in open_file:
                 tokens.append(line.strip("\n"))
         self._from_list(tokens)
@@ -67,15 +68,15 @@ class Vocabulary:
     def __str__(self) -> str:
         return self.stoi.__str__()
 
-    def to_file(self, file: str) -> None:
+    def to_file(self, file: Path) -> None:
         """
         Save the vocabulary to a file, by writing token with index i in line i.
 
         :param file: path to file where the vocabulary is written
         """
-        with open(file, "w") as open_file:
+        with file.open("w") as open_file:
             for t in self.itos:
-                open_file.write("{}\n".format(t))
+                open_file.write(f"{t}\n")
 
     def add_tokens(self, tokens: List[str]) -> None:
         """
@@ -161,7 +162,7 @@ class Vocabulary:
 
 
 def build_vocab(max_size: int, min_freq: int, tokens: List[List[str]],
-                vocab_file: str = None) -> Vocabulary:
+                vocab_file: Path = None) -> Vocabulary:
     """
     Builds vocabulary for a torchtext `field` from given`dataset` or
     `vocab_file`.

@@ -3,15 +3,11 @@
 Collection of helper functions
 """
 import copy
-import glob
-import os
-import os.path
-import errno
 import shutil
 import random
 import logging
 from typing import Optional, List
-import pathlib
+from pathlib import Path
 import numpy as np
 import pkg_resources
 
@@ -29,7 +25,7 @@ class ConfigurationError(Exception):
     """ Custom exception for misspecifications of configuration """
 
 
-def make_model_dir(model_dir: str, overwrite=False) -> str:
+def make_model_dir(model_dir: Path, overwrite=False) -> Path:
     """
     Create a new directory for the model.
 
@@ -37,17 +33,18 @@ def make_model_dir(model_dir: str, overwrite=False) -> str:
     :param overwrite: whether to overwrite an existing directory
     :return: path to model directory
     """
-    if os.path.isdir(model_dir):
+    model_dir = model_dir.absolute()
+    if model_dir.is_dir():
         if not overwrite:
             raise FileExistsError(
                 "Model directory exists and overwriting is disabled.")
         # delete previous directory to start with empty dir again
         shutil.rmtree(model_dir)
-    os.makedirs(model_dir)
+    model_dir.mkdir()
     return model_dir
 
 
-def make_logger(log_dir: str = None, mode: str = "train") -> str:
+def make_logger(log_dir: Path = None, mode: str = "train") -> str:
     """
     Create a logger for logging the training/testing process.
 
@@ -65,10 +62,10 @@ def make_logger(log_dir: str = None, mode: str = "train") -> str:
             '%(asctime)s - %(levelname)s - %(name)s - %(message)s')
 
         if log_dir is not None:
-            if os.path.exists(log_dir):
-                log_file = os.path.join(log_dir, f'{mode}.log')
+            if log_dir.is_dir():
+                log_file = log_dir / f'{mode}.log'
 
-                fh = logging.FileHandler(log_file)
+                fh = logging.FileHandler(log_file.as_posix())
                 fh.setLevel(level=logging.DEBUG)
                 logger.addHandler(fh)
                 fh.setFormatter(formatter)
@@ -149,9 +146,9 @@ def log_data_info(train_data: Dataset, valid_data: Dataset, test_data: Dataset,
     :param trg_vocab:
     """
     logger = logging.getLogger(__name__)
-    logger.info("train dataset: %s", train_data)
-    logger.info("valid dataset: %s", valid_data)
-    logger.info(" test dataset: %s", test_data)
+    logger.info("Train data: %s", train_data)
+    logger.info("Valid data: %s", valid_data)
+    logger.info(" Test data: %s", test_data)
 
     if train_data:
         logger.info("First training example:\n\t[SRC] %s\n\t[TRG] %s",
@@ -159,24 +156,24 @@ def log_data_info(train_data: Dataset, valid_data: Dataset, test_data: Dataset,
                     " ".join(train_data.trg[0]))
 
     logger.info(
-        "First 10 words (src): %s",
+        "First 10 Src tokens: %s",
         " ".join('(%d) %s' % (i, t) for i, t in enumerate(src_vocab.itos[:10])))
     logger.info(
-        "First 10 words (trg): %s",
+        "First 10 Trg tokens: %s",
         " ".join('(%d) %s' % (i, t) for i, t in enumerate(trg_vocab.itos[:10])))
 
-    logger.info("Number of Src words (types): %d", len(src_vocab))
-    logger.info("Number of Trg words (types): %d", len(trg_vocab))
+    logger.info("Number of unique Src tokens (vocab_size): %d", len(src_vocab))
+    logger.info("Number of unique Trg tokens (vocab_size): %d", len(trg_vocab))
 
 
-def load_config(path="configs/default.yaml") -> dict:
+def load_config(path: Path = Path("configs/default.yaml")) -> dict:
     """
     Loads and parses a YAML configuration file.
 
     :param path: path to YAML configuration file
     :return: configuration dictionary
     """
-    with open(path, 'r') as ymlfile:
+    with path.open('r') as ymlfile:
         cfg = yaml.safe_load(ymlfile)
     return cfg
 
@@ -220,7 +217,7 @@ def store_attention_plots(attentions: np.array,
     for i in indices:
         if i >= len(sources):
             continue
-        plot_file = "{}.{}.pdf".format(output_prefix, i)
+        plot_file = f"{output_prefix}.{i}.pdf"
         src = sources[i]
         trg = targets[i]
         attention_scores = attentions[i].T
@@ -238,8 +235,7 @@ def store_attention_plots(attentions: np.array,
                                    output_path=None,
                                    dpi=50)
                 tb_writer.add_figure("attention/{}.".format(i),
-                                     fig,
-                                     global_step=steps)
+                                     fig, global_step=steps)
         except: # pylint: disable=bare-except
             print("Couldn't plot example {}: src len {}, trg len {}, "
                   "attention scores shape {}".format(i, len(src), len(trg),
@@ -247,7 +243,7 @@ def store_attention_plots(attentions: np.array,
             continue
 
 
-def get_latest_checkpoint(ckpt_dir: str) -> Optional[str]:
+def get_latest_checkpoint(ckpt_dir: Path) -> Optional[Path]:
     """
     Returns the latest checkpoint (by time) from the given directory.
     If there is no checkpoint in this directory, returns None
@@ -255,10 +251,10 @@ def get_latest_checkpoint(ckpt_dir: str) -> Optional[str]:
     :param ckpt_dir:
     :return: latest checkpoint file
     """
-    list_of_files = glob.glob(os.path.join(ckpt_dir, "*.ckpt"))
+    list_of_files = ckpt_dir.glob("*.ckpt")
     latest_checkpoint = None
     if list_of_files:
-        latest_checkpoint = max(list_of_files, key=os.path.getctime)
+        latest_checkpoint = max(list_of_files, key=lambda f: f.stat().st_ctime)
 
     # check existence
     if latest_checkpoint is None:
@@ -267,7 +263,7 @@ def get_latest_checkpoint(ckpt_dir: str) -> Optional[str]:
     return latest_checkpoint
 
 
-def load_checkpoint(path: str, device: torch.device) -> dict:
+def load_checkpoint(path: Path, device: torch.device) -> dict:
     """
     Load model from saved checkpoint.
 
@@ -275,8 +271,10 @@ def load_checkpoint(path: str, device: torch.device) -> dict:
     :param device: using cuda or not
     :return: checkpoint (dict)
     """
-    assert os.path.isfile(path), "Checkpoint %s not found" % path
-    checkpoint = torch.load(path, map_location=device)
+    logger = logging.getLogger(__name__)
+    assert path.is_file(), "Checkpoint %s not found" % path
+    checkpoint = torch.load(path.as_posix(), map_location=device)
+    logger.info("Load model from %s.", path)
     return checkpoint
 
 
@@ -323,25 +321,14 @@ def freeze_params(module: nn.Module) -> None:
         p.requires_grad = False
 
 
-def symlink_update(target, link_name):
-    try:
-        os.symlink(target, link_name)
-    except FileExistsError as e:
-        if e.errno == errno.EEXIST:
-            os.remove(link_name)
-            os.symlink(target, link_name)
-        else:
-            raise e
-
-
-def delete_ckpt(to_delete: str) -> None:
+def delete_ckpt(to_delete: Path) -> None:
     """
     Delete checkpoint
 
-    :param to_delete: filename of the checkpint to be deleted
+    :param to_delete: checkpoint file to be deleted
     """
     try:
-        os.remove(to_delete)
+        to_delete.unlink()
     except FileNotFoundError as e:
         logger = logging.getLogger(__name__)
         logger.warning(
@@ -350,8 +337,7 @@ def delete_ckpt(to_delete: str) -> None:
         #raise e
 
 
-def latest_checkpoint_update(target: pathlib.Path,
-                             link_name: str) -> Optional[pathlib.Path]:
+def symlink_update(target: Path, link_name: str) -> Optional[Path]:
     """
     This function finds the file that the symlink currently points to, sets it
     to the new target, and returns the previous target if it exists.
@@ -364,7 +350,7 @@ def latest_checkpoint_update(target: pathlib.Path,
             updated in this function. If the symlink did not exist before or did
             not have a target, None is returned instead.
     """
-    link = pathlib.Path(link_name)
+    link = Path(link_name)
     if link.is_symlink():
         current_last = link.resolve()
         link.unlink()

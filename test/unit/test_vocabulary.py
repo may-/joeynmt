@@ -1,5 +1,5 @@
 import unittest
-import os
+from pathlib import Path
 
 from joeynmt.vocabulary import Vocabulary
 
@@ -12,8 +12,8 @@ class TestVocabulary(unittest.TestCase):
                "Geschichte vom Meer ist."
         self.word_list = sent.split()  # only unique tokens
         self.char_list = list(sent)
-        self.temp_file_char = "tmp.src.char"
-        self.temp_file_word = "tmp.src.word"
+        self.temp_file_char = Path("tmp.src.char")
+        self.temp_file_word = Path("tmp.src.word")
         self.word_vocab = Vocabulary(tokens=sorted(list(set(self.word_list))))
         self.char_vocab = Vocabulary(tokens=sorted(list(set(self.char_list))))
 
@@ -43,8 +43,8 @@ class TestVocabulary(unittest.TestCase):
         char_vocab2 = Vocabulary(file=self.temp_file_char)
         self.assertEqual(self.word_vocab.itos, word_vocab2.itos)
         self.assertEqual(self.char_vocab.itos, char_vocab2.itos)
-        os.remove(self.temp_file_char)
-        os.remove(self.temp_file_word)
+        self.temp_file_char.unlink()
+        self.temp_file_word.unlink()
 
     def testIsUnk(self):
         self.assertTrue(self.word_vocab.is_unk("BLA"))

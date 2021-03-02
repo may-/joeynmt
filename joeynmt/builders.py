@@ -133,71 +133,57 @@ def build_scheduler(config: dict, optimizer: Optimizer, scheduler_mode: str,
     scheduler, scheduler_step_at = None, None
     if "scheduling" in config.keys() and config["scheduling"]:
         scheduler_name = config["scheduling"].lower()
+        kwargs = {}
         if scheduler_name == "plateau":
             # learning rate scheduler
-            scheduler = ReduceLROnPlateau(
-                optimizer=optimizer,
-                mode=scheduler_mode,
-                verbose=False,
-                threshold_mode='abs',
-                factor=config.get("decrease_factor", 0.1),
-                patience=config.get("patience", 10))
+            kwargs = {"mode": scheduler_mode,
+                      "verbose":False,
+                      "threshold_mode": 'abs',
+                      "factor": config.get("decrease_factor", 0.1),
+                      "patience": config.get("patience", 10)}
+            scheduler = ReduceLROnPlateau(optimizer=optimizer, **kwargs)
             # scheduler step is executed after every validation
             scheduler_step_at = "validation"
         elif scheduler_name == "decaying":
-            scheduler = StepLR(optimizer=optimizer,
-                               step_size=config.get("decaying_step_size", 1))
+            kwargs = {"step_size": config.get("decaying_step_size", 1)}
+            scheduler = StepLR(optimizer=optimizer, **kwargs)
             # scheduler step is executed after every epoch
             scheduler_step_at = "epoch"
         elif scheduler_name == "exponential":
-            scheduler = ExponentialLR(optimizer=optimizer,
-                                      gamma=config.get("decrease_factor", 0.99))
+            kwargs = {"gamma": config.get("decrease_factor", 0.99)}
+            scheduler = ExponentialLR(optimizer=optimizer, **kwargs)
             # scheduler step is executed after every epoch
             scheduler_step_at = "epoch"
         elif scheduler_name == "noam":
-            factor = config.get("learning_rate_factor", 1)
-            warmup = config.get("learning_rate_warmup", 4000)
-            scheduler = NoamScheduler(hidden_size=hidden_size,
-                                      factor=factor,
-                                      warmup=warmup,
-                                      optimizer=optimizer)
+            scheduler = NoamScheduler(optimizer=optimizer,
+                hidden_size=hidden_size,
+                factor=config.get("learning_rate_factor", 1),
+                warmup=config.get("learning_rate_warmup", 4000))
             scheduler_step_at = "step"
         elif scheduler_name == "warmupexponentialdecay":
-            min_rate = config.get("learning_rate_min", 1.0e-5)
-            decay_rate = config.get("learning_rate_decay", 0.1)
-            warmup = config.get("learning_rate_warmup", 4000)
-            peak_rate = config.get("learning_rate_peak", 1.0e-3)
-            decay_length = config.get("learning_rate_decay_length", 10000)
             scheduler = WarmupExponentialDecayScheduler(
-                min_rate=min_rate,
-                decay_rate=decay_rate,
-                warmup=warmup,
                 optimizer=optimizer,
-                peak_rate=peak_rate,
-                decay_length=decay_length)
+                min_rate=config.get("learning_rate_min", 1.0e-5),
+                decay_rate=config.get("learning_rate_decay", 0.1),
+                warmup=config.get("learning_rate_warmup", 4000),
+                peak_rate=config.get("learning_rate_peak", 1.0e-3),
+                decay_length=config.get("learning_rate_decay_length", 10000))
             scheduler_step_at = "step"
         elif scheduler_name == "warmupinversesquareroot":
-            min_rate = config.get("learning_rate_min", 1.0e-5)
-            warmup = config.get("learning_rate_warmup", 10000)
             lr = config.get("learning_rate", 1.0e-3)
             peak_rate = config.get("learning_rate_peak", lr)
             scheduler = WarmupInverseSquareRootScheduler(
-                min_rate=min_rate,
-                warmup=warmup,
-                optimizer=optimizer,
-                peak_rate=peak_rate)
+                optimizer=optimizer, peak_rate=peak_rate,
+                min_rate=config.get("learning_rate_min", 1.0e-5),
+                warmup=config.get("learning_rate_warmup", 10000))
             scheduler_step_at = "step"
 
     if scheduler_name in [
         "noam", "warmupexponentialdecay", "warmupinversesquareroot"]:
         logger.info(scheduler)
     else:
-        print(scheduler.__dict__)
-        print(vars(scheduler))
         logger.info("%s(%s)", scheduler.__class__.__name__,
-            ", ".join(['{}={}'.format(k, v) for k, v in scheduler.__dict__.items()
-                       if not k.startswith("_") or k != "optimizer"]))
-
+            ", ".join(['{}={}'.format(k, v) for k, v in kwargs.items()]))
     return scheduler, scheduler_step_at
 
 

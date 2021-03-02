@@ -4,6 +4,7 @@ Module to represents whole models
 """
 from typing import Callable
 import logging
+import numpy as np
 
 import torch.nn as nn
 from torch import Tensor
@@ -190,6 +191,19 @@ class Model(nn.Module):
                                         self.encoder, self.decoder,
                                         self.src_embed, self.trg_embed,
                                         self.loss_function)
+
+    def log_parameters_list(self) -> None:
+        """
+        Write all model parameters (name, shape) to the log.
+        """
+        model_parameters = filter(lambda p: p.requires_grad, self.parameters())
+        n_params = sum([np.prod(p.size()) for p in model_parameters])
+        logger.info("Total params: %d", n_params)
+        trainable_params = [
+            n for (n, p) in self.named_parameters() if p.requires_grad
+        ]
+        logger.debug("Trainable parameters: %s", sorted(trainable_params))
+        assert trainable_params
 
 
 class _DataParallel(nn.DataParallel):

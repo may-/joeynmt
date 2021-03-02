@@ -8,10 +8,10 @@ import time
 import shutil
 from typing import List
 import logging
-import os
 import sys
 import collections
-import pathlib
+from pathlib import Path
+from multiprocessing import cpu_count
 import numpy as np
 
 import torch
@@ -23,7 +23,7 @@ from joeynmt.model import build_model
 from joeynmt.batch import Batch
 from joeynmt.helpers import load_config, log_cfg, store_attention_plots, \
     load_checkpoint, make_model_dir, make_logger, set_seed, symlink_update, \
-    delete_ckpt, latest_checkpoint_update, ConfigurationError
+    delete_ckpt, ConfigurationError
 from joeynmt.model import Model, _DataParallel
 from joeynmt.prediction import validate_on_data
 from joeynmt.loss import XentLoss
@@ -42,7 +42,7 @@ except ImportError as no_apex:
     logger.debug(no_apex)
     # error handling in TrainManager object construction
     #pass # pylint: disable=unnecessary-pass
-    
+
 
 class TrainManager:
     """ Manages training loop, validations, learning rate scheduling
@@ -63,19 +63,19 @@ class TrainManager:
         self.batch_class = batch_class
 
         # files for logging and storing
-        self.model_dir = train_config["model_dir"]
-        assert os.path.exists(self.model_dir)
+        self.model_dir = Path(train_config["model_dir"])
+        assert self.model_dir.is_dir()
 
         self.logging_freq = train_config.get("logging_freq", 100)
-        self.valid_report_file = os.path.join(self.model_dir, "validations.txt")
+        self.valid_report_file = self.model_dir / "validations.txt"
         self.tb_writer = SummaryWriter(
-            log_dir=os.path.join(self.model_dir, "tensorboard"))
+            log_dir=(self.model_dir / "tensorboard").as_posix())
 
         self.save_latest_checkpoint = train_config.get("save_latest_ckpt", True)
 
         # model
         self.model = model
-        self._log_parameters_list()
+        self.model.log_parameters_list()
 
         # objective
         self.label_smoothing = train_config.get("label_smoothing", 0.0)
@@ -180,12 +180,7 @@ class TrainManager:
             self.model.to(self.device)
         self.num_workers = train_config.get("num_workers", 0)
         if self.num_workers > 0:
-            if 'pathos' not in sys.modules:
-                logger.debug("pathos multiproccessing is not available.")
-                self.num_workers = 0
-            else:
-                self.num_workers = min(multiprocessing.cpu_count(),
-                                       self.num_workers)
+            self.num_workers = min(cpu_count(), self.num_workers)
 
         # fp16
         self.fp16 = train_config.get("fp16", False)
@@ -213,7 +208,7 @@ class TrainManager:
         # model parameters
         if "load_model" in train_config.keys():
             self.init_from_checkpoint(
-                train_config["load_model"],
+                Path(train_config["load_model"]),
                 reset_best_ckpt=train_config.get("reset_best_ckpt", False),
                 reset_scheduler=train_config.get("reset_scheduler", False),
                 reset_optimizer=train_config.get("reset_optimizer", False),
@@ -236,32 +231,25 @@ class TrainManager:
         :param new_best: This boolean signals which symlink we will use for the
           new checkpoint. If it is true, we update best.ckpt, else latest.ckpt.
         """
-        model_path = os.path.join(self.model_dir, f"{self.stats.steps}.ckpt")
+        model_path = self.model_dir / f"{self.stats.steps}.ckpt"
         logger.info("Saving new checkpoint: %s", model_path)
         model_state_dict = self.model.module.state_dict() \
             if isinstance(self.model, torch.nn.DataParallel) \
             else self.model.state_dict()
         state = {
-            "steps":
-            self.stats.steps,
-            "total_tokens":
-            self.stats.total_tokens,
-            "best_ckpt_score":
-            self.stats.best_ckpt_score,
-            "best_ckpt_iteration":
-            self.stats.best_ckpt_iter,
-            "model_state":
-            model_state_dict,
-            "optimizer_state":
-            self.optimizer.state_dict(),
-            "scheduler_state":
-            self.scheduler.state_dict() if self.scheduler is not None else None,
-            'amp_state':
-            amp.state_dict() if self.fp16 else None,
+            "steps": self.stats.steps,
+            "total_tokens": self.stats.total_tokens,
+            "best_ckpt_score": self.stats.best_ckpt_score,
+            "best_ckpt_iteration": self.stats.best_ckpt_iter,
+            "model_state": model_state_dict,
+            "optimizer_state": self.optimizer.state_dict(),
+            "scheduler_state": self.scheduler.state_dict() \
+                if self.scheduler is not None else None,
+            'amp_state': amp.state_dict() if self.fp16 else None,
             "train_iter_state":
             self.train_iter.batch_sampler.sampler.generator.get_state()
         }
-        torch.save(state, model_path)
+        torch.save(state, model_path.as_posix())
         symlink_target = f"{self.stats.steps}.ckpt"
         if new_best:
             if self.ckpt_queue.maxlen is not None and \
@@ -271,7 +259,7 @@ class TrainManager:
 
             self.ckpt_queue.append(model_path)
 
-            best_path = os.path.join(self.model_dir, "best.ckpt")
+            best_path = self.model_dir / "best.ckpt"
             try:
                 # create/modify symbolic link for best checkpoint
                 symlink_update(symlink_target, best_path)
@@ -280,20 +268,20 @@ class TrainManager:
                 torch.save(state, best_path)
 
         if self.save_latest_checkpoint:
-            last_path = os.path.join(self.model_dir, "latest.ckpt")
-            previous_path = latest_checkpoint_update(symlink_target, last_path)
+            last_path = self.model_dir / "latest.ckpt"
+            previous_path = symlink_update(symlink_target, last_path)
             # If the last ckpt is in the ckpt_queue, we don't want to delete it.
             if self.ckpt_queue.maxlen is not None:
                 can_delete = True
                 for ckpt_path in self.ckpt_queue:
-                    if pathlib.Path(ckpt_path).resolve() == previous_path:
+                    if Path(ckpt_path).resolve() == previous_path:
                         can_delete = False
                         break
                 if can_delete and previous_path is not None:
                     delete_ckpt(previous_path)
 
     def init_from_checkpoint(self,
-                             path: str,
+                             path: Path,
                              reset_best_ckpt: bool = False,
                              reset_scheduler: bool = False,
                              reset_optimizer: bool = False,
@@ -315,7 +303,6 @@ class TrainManager:
         :param reset_iter_state: reset the sampler's internal state and do not
                                 use the one stored in the checkpoint.
         """
-        logger.info("Loading model from %s", path)
         model_checkpoint = load_checkpoint(path=path, device=self.device)
 
         # restore model and optimizer parameters
@@ -413,10 +400,10 @@ class TrainManager:
             "\t16-bits training: %r\n"
             "\tgradient accumulation: %d\n"
             "\tbatch size per device: %d\n"
-            "\ttotal batch size (w. parallel & accumulation): %d\n",
-            "\tnum. of multiprocessing workers: %d", self.device.type,
-            self.n_gpu, self.fp16, self.batch_multiplier,
-            self.batch_size // self.n_gpu if self.n_gpu > 1 else self.batch_size,
+            "\ttotal batch size (w. parallel & accumulation): %d\n"
+            "\tnum. of multiprocessing workers: %d",
+            self.device.type, self.n_gpu, self.fp16, self.batch_multiplier,
+            self.batch_size//self.n_gpu if self.n_gpu > 1 else self.batch_size,
             self.batch_size * self.batch_multiplier, self.num_workers)
         # pylint: enable=logging-too-many-args
 
@@ -642,14 +629,15 @@ class TrainManager:
 
         # store attention plots for selected valid sentences
         if valid_attention_scores:
-            store_attention_plots(attentions=valid_attention_scores,
-                                  targets=valid_hypotheses_raw,
-                                  sources=valid_data.src,
-                                  indices=self.log_valid_sents,
-                                  output_prefix=os.path.join(
-                                  self.model_dir, f"att.{self.stats.steps}"),
-                                  tb_writer=self.tb_writer,
-                                  steps=self.stats.steps)
+            store_attention_plots(
+                attentions=valid_attention_scores,
+                targets=valid_hypotheses_raw,
+                sources=valid_data.src,
+                indices=self.log_valid_sents,
+                output_prefix=(self.model_dir / f"att.{self.stats.steps}"
+                               ).as_posix(),
+                tb_writer=self.tb_writer,
+                steps=self.stats.steps)
 
         return valid_duration
 
@@ -677,26 +665,12 @@ class TrainManager:
         if current_lr < self.learning_rate_min:
             self.stats.is_min_lr = True
 
-        with open(self.valid_report_file, 'a') as opened_file:
+        with self.valid_report_file.open('a') as opened_file:
             opened_file.write(
                 "Steps: {}\tLoss: {:.5f}\tPPL: {:.5f}\t{}: {:.5f}\t"
                 "LR: {:.8f}\t{}\n".format(self.stats.steps, valid_loss,
                                           valid_ppl, eval_metric, valid_score,
                                           current_lr, "*" if new_best else ""))
-
-    def _log_parameters_list(self) -> None:
-        """
-        Write all model parameters (name, shape) to the log.
-        """
-        model_parameters = filter(lambda p: p.requires_grad,
-                                  self.model.parameters())
-        n_params = sum([np.prod(p.size()) for p in model_parameters])
-        logger.info("Total params: %d", n_params)
-        trainable_params = [
-            n for (n, p) in self.model.named_parameters() if p.requires_grad
-        ]
-        logger.debug("Trainable parameters: %s", sorted(trainable_params))
-        assert trainable_params
 
     def _log_examples(self,
                       sources: List[str],
@@ -739,11 +713,10 @@ class TrainManager:
 
         :param hypotheses: list of strings
         """
-        current_valid_output_file = os.path.join(self.model_dir,
-                                                 f"{self.stats.steps}.hyps")
-        with open(current_valid_output_file, 'w') as opened_file:
+        current_valid_output_file = self.model_dir / f"{self.stats.steps}.hyps"
+        with current_valid_output_file.open('w') as opened_file:
             for hyp in hypotheses:
-                opened_file.write("{}\n".format(hyp))
+                opened_file.write(f"{hyp}\n")
 
     class TrainStatistics:
         def __init__(self,
@@ -785,10 +758,10 @@ def train(cfg_file: str) -> None:
 
     :param cfg_file: path to configuration yaml file
     """
-    cfg = load_config(cfg_file)
+    cfg = load_config(Path(cfg_file))
 
     # make logger
-    model_dir = make_model_dir(cfg["training"]["model_dir"],
+    model_dir = make_model_dir(Path(cfg["training"]["model_dir"]),
                                overwrite=cfg["training"].get(
                                    "overwrite", False))
     _ = make_logger(model_dir, mode="train")  # version string returned
@@ -808,25 +781,22 @@ def train(cfg_file: str) -> None:
     trainer = TrainManager(model=model, config=cfg, batch_class=Batch)
 
     # store copy of original training config in model dir
-    shutil.copy2(cfg_file, os.path.join(model_dir, "config.yaml"))
+    shutil.copy2(cfg_file, (model_dir / "config.yaml").as_posix())
 
     # log all entries of config
     log_cfg(cfg)
 
     # store the vocabs
-    src_vocab_file = os.path.join(cfg["training"]["model_dir"], "src_vocab.txt")
-    trg_vocab_file = os.path.join(cfg["training"]["model_dir"], "trg_vocab.txt")
-    src_vocab.to_file(src_vocab_file)
-    trg_vocab.to_file(trg_vocab_file)
+    src_vocab.to_file(model_dir / "src_vocab.txt")
+    trg_vocab.to_file(model_dir / "trg_vocab.txt")
 
     # train the model
     trainer.train_and_validate(train_data=train_data, valid_data=dev_data)
 
     # predict with the best model on validation and test
     # (if test data is available)
-    ckpt = os.path.join(model_dir, f"{trainer.stats.best_ckpt_iter}.ckpt")
-    output_name = "{:08d}.hyps".format(trainer.stats.best_ckpt_iter)
-    output_path = os.path.join(model_dir, output_name)
+    ckpt = model_dir / f"{trainer.stats.best_ckpt_iter}.ckpt"
+    output_path = model_dir / "{:08d}.hyps".format(trainer.stats.best_ckpt_iter)
     datasets_to_test = {
         "dev": dev_data,
         "test": test_data,
@@ -834,8 +804,8 @@ def train(cfg_file: str) -> None:
         "trg_vocab": trg_vocab
     }
     test(cfg_file,
-         ckpt=ckpt,
-         output_path=output_path,
+         ckpt=ckpt.as_posix(),
+         output_path=output_path.as_posix(),
          datasets=datasets_to_test)
 
 

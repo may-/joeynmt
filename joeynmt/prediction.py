@@ -18,7 +18,7 @@ from joeynmt.model import build_model, Model, _DataParallel
 from joeynmt.search import run_batch
 from joeynmt.batch import Batch
 from joeynmt.data import load_data, make_data_iter, TranslationDataset, \
-    _read_data_file
+    read_data_file
 from joeynmt.vocabulary import Vocabulary
 
 logger = logging.getLogger(__name__)
@@ -87,10 +87,10 @@ def validate_on_data(model: Model, data: Dataset,
 
     # caution: batch_size divided by beam_size, because a batch will be expanded
     # to batch_size*beam_size, and it could cause an out-of-memory error.
-    valid_iter = make_data_iter(
-        dataset=data, src_vocab=model.src_vocab, trg_vocab=model.trg_vocab,
-        batch_class=batch_class, batch_size=batch_size//beam_size,
-        batch_type=batch_type, shuffle=False)
+    valid_iter = make_data_iter(dataset=data, batch_size=batch_size//beam_size,
+                                batch_type=batch_type, batch_class=batch_class,
+                                shuffle=False, pad_index=model.pad_index,
+                                device=device)
     valid_sources_raw = data.src
 
     # disable dropout
@@ -106,7 +106,6 @@ def validate_on_data(model: Model, data: Dataset,
         for batch in valid_iter:
             # sort batch now by src length and keep track of order
             sort_reverse_index = batch.sort_by_src_length()
-            batch.make_cuda(device)
 
             # run as during training to get validation loss (e.g. xent)
             if compute_loss and batch.trg is not None:
@@ -241,8 +240,7 @@ def parse_test_args(cfg, mode="test"):
     decoding_description = "Greedy decoding" if beam_size < 2 else \
         "Beam search decoding with beam size = {} and alpha = {}". \
             format(beam_size, beam_alpha)
-    tokenizer_info = f"[{sacrebleu['tokenize']}]" \
-        if eval_metric == "bleu" else ""
+    tokenizer_info = sacrebleu['tokenize'] if eval_metric == "bleu" else ""
 
     return batch_size, batch_type, use_cuda, device, n_gpu, level, \
            eval_metric, max_output_length, beam_size, beam_alpha, \
@@ -275,7 +273,8 @@ def test(cfg_file,
     # load the data
     if datasets is None:
         _, dev_data, test_data, src_vocab, trg_vocab = load_data(
-            data_cfg=cfg["data"], datasets=["dev", "test"])
+            data_cfg=cfg["data"], datasets=["dev", "test"],
+            num_workers=cfg["training"]["num_workers"])
         data_to_predict = {"dev": dev_data, "test": test_data}
     else:  # avoid to load data again
         data_to_predict = {"dev": datasets["dev"], "test": datasets["test"]}
@@ -329,7 +328,7 @@ def test(cfg_file,
         #pylint: enable=unused-variable
 
         if data_set.trg is not None:
-            logger.info("%4s %s%s: %6.2f [%s]",
+            logger.info("%4s %s[%s]: %6.2f (%s)",
                         data_set_name, eval_metric, tokenizer_info,
                         score, decoding_description)
         else:
@@ -431,7 +430,7 @@ def translate(cfg_file: str,
     if not sys.stdin.isatty():
         # input file given
         assert test_path is not None, "Test file is not given."
-        test_src, _ = _read_data_file(Path(test_path), (src_lang, None),
+        test_src, _ = read_data_file(Path(test_path), (src_lang, None),
                                       tok_fun, lowercase)
         test_data = TranslationDataset(test_src)
         hypotheses = _translate_data(test_data)

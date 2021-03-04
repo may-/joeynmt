@@ -11,13 +11,13 @@ import logging
 import sys
 import collections
 from pathlib import Path
-from multiprocessing import cpu_count
 import numpy as np
 
 import torch
 from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import Dataset
+from torch.multiprocessing import cpu_count
 
 from joeynmt.model import build_model
 from joeynmt.batch import Batch
@@ -355,14 +355,14 @@ class TrainManager:
         # pylint: disable=too-many-branches
         # pylint: disable=too-many-statements
         self.train_iter = make_data_iter(train_data,
-                                         src_vocab=self.model.src_vocab,
-                                         trg_vocab=self.model.trg_vocab,
-                                         batch_class=self.batch_class,
                                          batch_size=self.batch_size,
                                          batch_type=self.batch_type,
+                                         batch_class=self.batch_class,
                                          seed=self.seed,
                                          shuffle=self.shuffle,
-                                         num_workers=self.num_workers)
+                                         num_workers=self.num_workers,
+                                         pad_index=self.model.pad_index,
+                                         device=self.device)
 
         if self.train_iter_state is not None:
             self.train_iter.batch_sampler.sampler.generator.set_state(
@@ -424,11 +424,8 @@ class TrainManager:
             batch_loss = 0
 
             for i, batch in enumerate(self.train_iter):
-                # create a Batch object from torchtext batch
+                # yield a joeynmt Batch object
                 batch.sort_by_src_length()
-                batch.make_cuda(self.device)
-                #batch = self.batch_class(batch, self.model.pad_index,
-                #                         use_cuda=self.use_cuda)
 
                 # get batch loss
                 batch_loss += self._train_step(batch)
@@ -772,7 +769,7 @@ def train(cfg_file: str) -> None:
 
     # load the data
     train_data, dev_data, test_data, src_vocab, trg_vocab = load_data(
-        data_cfg=cfg["data"])
+        data_cfg=cfg["data"], num_workers=cfg["training"].get("num_workers", 0))
 
     # build an encoder-decoder model
     model = build_model(cfg["model"], src_vocab=src_vocab, trg_vocab=trg_vocab)

@@ -6,15 +6,14 @@ from typing import Callable
 import logging
 import numpy as np
 
-import torch.nn as nn
 from torch import Tensor
+import torch.nn as nn
 import torch.nn.functional as F
 
 from joeynmt.initialization import initialize_model
 from joeynmt.embeddings import Embeddings
 from joeynmt.encoders import Encoder, RecurrentEncoder, TransformerEncoder
 from joeynmt.decoders import Decoder, RecurrentDecoder, TransformerDecoder
-from joeynmt.constants import PAD_TOKEN, EOS_TOKEN, BOS_TOKEN
 from joeynmt.vocabulary import Vocabulary
 from joeynmt.helpers import ConfigurationError
 
@@ -50,9 +49,9 @@ class Model(nn.Module):
         self.decoder = decoder
         self.src_vocab = src_vocab
         self.trg_vocab = trg_vocab
-        self.pad_index = self.trg_vocab.stoi[PAD_TOKEN]
-        self.bos_index = self.trg_vocab.stoi[BOS_TOKEN]
-        self.eos_index = self.trg_vocab.stoi[EOS_TOKEN]
+        self.pad_index = self.trg_vocab.pad_index
+        self.bos_index = self.trg_vocab.bos_index
+        self.eos_index = self.trg_vocab.eos_index
         #self.loss_function = None # set by the TrainManager
 
     @property
@@ -227,12 +226,10 @@ def build_model(cfg: dict = None,
     :return: built and initialized model
     """
     logger.info("Building an encoder-decoder model...")
-    src_padding_idx = src_vocab.stoi[PAD_TOKEN]
-    trg_padding_idx = trg_vocab.stoi[PAD_TOKEN]
 
     src_embed = Embeddings(
         **cfg["encoder"]["embeddings"], vocab_size=len(src_vocab),
-        padding_idx=src_padding_idx)
+        padding_idx=src_vocab.pad_index)
 
     # this ties source and target embeddings
     # for softmax layer tying, see further below
@@ -246,7 +243,7 @@ def build_model(cfg: dict = None,
     else:
         trg_embed = Embeddings(
             **cfg["decoder"]["embeddings"], vocab_size=len(trg_vocab),
-            padding_idx=trg_padding_idx)
+            padding_idx=trg_vocab.pad_index)
 
     # build encoder
     enc_dropout = cfg["encoder"].get("dropout", 0.)
@@ -293,7 +290,7 @@ def build_model(cfg: dict = None,
                 "The decoder must be a Transformer.")
 
     # custom initialization of model parameters
-    initialize_model(model, cfg, src_padding_idx, trg_padding_idx)
+    initialize_model(model, cfg, src_vocab.pad_index, trg_vocab.pad_index)
 
     # initialize embeddings from file
     pretrained_enc_embed_path = cfg["encoder"]["embeddings"].get(

@@ -4,16 +4,14 @@
 Implementation of a mini-batch.
 """
 
-
 class Batch:
     """Object for holding a batch of data with mask during training.
-    Input is a batch from a torch text iterator.
+    Input is yielded from collate_fn in torch.data.utils.DataLoader.
     """
-    def __init__(self, src, src_length, trg, trg_length, pad_index):
+    def __init__(self, src, src_length, trg, trg_length, pad_index, device):
         """
-        Create a new joey batch from a torch batch.
-        This batch extends torch text's batch attributes with src and trg
-        length, masks, number of non-padded tokens in trg.
+        Create a new joey batch. This batch supports attributes with
+        src and trg length, masks, number of non-padded tokens in trg.
         Furthermore, it can be sorted by src length.
 
         :param src:
@@ -21,6 +19,7 @@ class Batch:
         :param trg:
         :param trg_length:
         :param pad_index:
+        :param device:
         """
         # pylint: disable=too-many-instance-attributes
         self.src = src
@@ -32,8 +31,6 @@ class Batch:
         self.trg_mask = None
         self.trg_length = None
         self.ntokens = None
-        #self.use_cuda = use_cuda
-        #self.device = torch.device("cuda" if self.use_cuda else "cpu")
 
         if trg is not None and trg_length is not None:
             # trg_input is used for teacher forcing, last one is cut off
@@ -45,10 +42,10 @@ class Batch:
             self.trg_mask = (self.trg_input != pad_index).unsqueeze(1)
             self.ntokens = (self.trg != pad_index).data.sum().item()
 
-        #if self.use_cuda:
-        #    self._make_cuda()
+        if device.type == "cuda":
+            self._make_cuda(device)
 
-    def make_cuda(self, device) -> None:
+    def _make_cuda(self, device) -> None:
         """
         Move the batch to GPU
         """

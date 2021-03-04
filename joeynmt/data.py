@@ -4,25 +4,41 @@ Data module
 """
 import sys
 from pathlib import Path
-from itertools import zip_longest
-from typing import Optional, List, Tuple, Callable, Union
+from functools import partial
+from typing import Optional, List, Tuple, Union
 import logging
-
 import numpy as np
 
 import torch
 from torch.utils.data import Dataset, Sampler, SequentialSampler, \
     RandomSampler, BatchSampler, DataLoader
 
-from joeynmt.constants import UNK_TOKEN, EOS_TOKEN, BOS_TOKEN, PAD_TOKEN
+from joeynmt.constants import PAD_ID
 from joeynmt.helpers import log_data_info
 from joeynmt.vocabulary import build_vocab, Vocabulary
 from joeynmt.batch import Batch
 
 logger = logging.getLogger(__name__)
 
+# multiprocessing
+try:
+    torch.multiprocessing.set_start_method('spawn')
+except RuntimeError as e:
+    logger.debug("torch.multiprocessing.set_start_method('spawn') faild.", e)
+    #pass
 
-def load_data(data_cfg: dict, datasets: list = None)\
+# pandas (for multiprocessing)
+try:
+    import pandas as pd
+except ImportError as no_pd:
+    class pd:
+        DataFrame = None # dummy to escape "pd" not-defined error message
+    logger.debug('pandas package not found.', no_pd)
+
+
+
+
+def load_data(data_cfg: dict, datasets: list = None, num_workers: int = 0) \
         -> (Dataset, Dataset, Optional[Dataset], Vocabulary, Vocabulary):
     """
     Load train, dev and optionally test data as specified in configuration.
@@ -39,6 +55,7 @@ def load_data(data_cfg: dict, datasets: list = None)\
     :param data_cfg: configuration dictionary for data
         ("data" part of configuation file)
     :param datasets: list of dataset names to load
+    :param num_workers:
     :return:
         - train_data: training dataset
         - dev_data: development dataset
@@ -63,13 +80,15 @@ def load_data(data_cfg: dict, datasets: list = None)\
     lowercase = data_cfg["lowercase"]
     max_len = data_cfg["max_sent_length"]
 
-    tok_fun = lambda s: list(s) if level == "char" else s.split()
-
     train_data, train_src, train_trg = None, None, None
     if "train" in datasets and train_path is not None:
         logger.info("Loading training data...")
-        train_src, train_trg = _read_data_file(
-            Path(train_path), (src_lang, trg_lang), tok_fun, lowercase, max_len)
+        train_src, train_trg = read_data_file(path=Path(train_path),
+                                              exts=(src_lang, trg_lang),
+                                              level=level,
+                                              lowercase=lowercase,
+                                              max_len=max_len,
+                                              num_workers=num_workers)
 
         random_train_subset = data_cfg.get("random_train_subset", -1)
         if random_train_subset > -1:
@@ -100,56 +119,163 @@ def load_data(data_cfg: dict, datasets: list = None)\
                             tokens=train_src, vocab_file=src_vocab_file)
     trg_vocab = build_vocab(min_freq=trg_min_freq, max_size=trg_max_size,
                             tokens=train_trg, vocab_file=trg_vocab_file)
-    assert src_vocab.stoi[UNK_TOKEN] == trg_vocab.stoi[UNK_TOKEN]
-    assert src_vocab.stoi[PAD_TOKEN] == trg_vocab.stoi[PAD_TOKEN]
-    assert src_vocab.stoi[BOS_TOKEN] == trg_vocab.stoi[BOS_TOKEN]
-    assert src_vocab.stoi[EOS_TOKEN] == trg_vocab.stoi[EOS_TOKEN]
+    assert src_vocab.pad_index == trg_vocab.pad_index
+    assert src_vocab.bos_index == trg_vocab.bos_index
+    assert src_vocab.eos_index == trg_vocab.eos_index
+
+    if train_data is not None:
+        train_data.src_padding = src_vocab.sentences_to_ids
+        train_data.trg_padding = trg_vocab.sentences_to_ids
 
     dev_data = None
     if "dev" in datasets and dev_path is not None:
         logger.info("Loading dev data...")
-        dev_src, dev_trg = _read_data_file(
-            Path(dev_path), (src_lang, trg_lang), tok_fun, lowercase)
+        dev_src, dev_trg = read_data_file(path=Path(dev_path),
+                                          exts=(src_lang, trg_lang),
+                                          level=level,
+                                          lowercase=lowercase,
+                                          num_workers=num_workers)
         dev_data = TranslationDataset(dev_src, dev_trg)
+        dev_data.src_padding = src_vocab.sentences_to_ids
+        dev_data.trg_padding = trg_vocab.sentences_to_ids
 
     test_data = None
     if "test" in datasets and test_path is not None:
         logger.info("Loading test data...")
         # check if target exists
-        if not Path(test_path).with_suffix(f'.{trg_lang}').is_file():
+        if not Path(f'{test_path}.{trg_lang}').is_file():
             # no target is given -> create dataset from src only
             trg_lang = None
-        test_src, test_trg = _read_data_file(
-            Path(test_path), (src_lang, trg_lang), tok_fun, lowercase)
+        test_src, test_trg = read_data_file(path=Path(test_path),
+                                            exts=(src_lang, trg_lang),
+                                            level=level,
+                                            lowercase=lowercase,
+                                            num_workers=num_workers)
         test_data = TranslationDataset(test_src, test_trg)
+        test_data.src_padding = src_vocab.sentences_to_ids
+        test_data.trg_padding = trg_vocab.sentences_to_ids
 
     logger.info("Data loaded.")
     log_data_info(train_data, dev_data, test_data, src_vocab, trg_vocab)
     return train_data, dev_data, test_data, src_vocab, trg_vocab
 
+# should locate in top-level (global scope)
+def _apply(df: pd.DataFrame, level: str = "bpe", lowercase: bool = True,
+           max_len: int = -1) -> pd.DataFrame:
+    tok_fn = partial(_tokenize, level=level, lowercase=lowercase)
+    filter_fn = partial(_filter, max_len=max_len)
+    df['src_tok'] = df['src'].apply(tok_fn)
+    df['src_mask'] = df['src_tok'].apply(filter_fn)
+    if 'trg' in df.columns:
+        df['trg_tok'] = df['trg'].apply(tok_fn)
+        df['trg_mask'] = df['trg_tok'].apply(filter_fn)
+    return df
+
+# should locate in top-level (global scope)
+def _tokenize(x: str, level: str = "bpe", lowercase: bool = True):
+    x = x.strip().lower() if lowercase else x.strip()
+    return list(x) if level == "char" else x.split()
+
+# should locate in top-level (global scope)
+def _filter(tokens: List[str], max_len: int = -1):
+    return not len(tokens) > max_len > 0
+
+
+def read_data_file(path: Path, exts: Tuple[str, Union[str, None]],
+                   level: str, lowercase: bool, max_len: int = -1,
+                   num_workers: int = 0) \
+        -> Tuple[List[List[str]], List[List[str]]]:
+    """
+    Read data files
+    :param path: data file path
+    :param exts: pair of file extensions
+    :param level: tokenization
+    :param lowercase: whether to lowercase or not
+    :param max_len: maximum length (longer instances will be filtered out)
+    :param num_workers:
+    :return: pair of tokenized sentence lists
+    """
+    src_lang, trg_lang = exts
+    src_file = path.with_suffix(f'{path.suffix}.{src_lang}')
+    doc = {'src': src_file.read_text().splitlines()}
+    if trg_lang:
+        trg_file = path.with_suffix(f'{path.suffix}.{trg_lang}')
+        doc['trg'] = trg_file.read_text().splitlines()
+        assert len(doc['src']) == len(doc['trg'])
+
+    if 'pandas' in sys.modules:
+        df = pd.DataFrame.from_dict(doc)
+
+        if len(df) > num_workers > 1:
+            with torch.multiprocessing.Pool(processes=num_workers) as pool:
+                df = pd.concat(pool.map(partial(_apply,
+                                                level=level,
+                                                lowercase=lowercase,
+                                                max_len=max_len),
+                                        np.array_split(df, num_workers)))
+        else:
+            df = _apply(df, level=level, lowercase=lowercase, max_len=max_len)
+
+        invalid = df[~df['src_mask'] | ~df['trg_mask']].index if trg_lang \
+            else df[~df['src_mask']].index
+        if len(invalid) > 0:
+            df = df.drop(invalid, axis=0)
+            logger.warning('\t%d instances were filtered out.', len(invalid))
+        src_list = df['src_tok'].tolist()
+        trg_list = df['trg_tok'].tolist() if trg_lang else []
+
+    else:
+        # pandas-package not available
+        src_tok = [_tokenize(x, level, lowercase) for x in doc['src']]
+        if trg_lang:
+            trg_tok = [_tokenize(x, level, lowercase) for x in doc['trg']]
+            src_list, trg_list = zip(*[(s, t) for s, t in zip(src_tok, trg_tok)
+                               if _filter(s, max_len) and _filter(t, max_len)])
+            assert len(src_list) == len(trg_list)
+        else:
+            src_list = [s for s in src_tok if _filter(s, max_len)]
+            trg_list = []
+    return src_list, trg_list
+
+# should locate in top-level (global scope)
+def collate_fn(batch, src_process, trg_process, batch_class,
+               pad_index, device) -> Batch:
+    src_list, trg_list = zip(*batch)
+    src, src_length = src_process(src_list)
+
+    trg, trg_length = None, None
+    if any(map(None.__ne__, trg_list)):
+        trg, trg_length = trg_process(trg_list)
+
+    return batch_class(torch.LongTensor(src),
+                       torch.LongTensor(src_length),
+                       torch.LongTensor(trg) if trg else None,
+                       torch.LongTensor(trg_length) if trg_length else None,
+                       pad_index, device)
+
 
 def make_data_iter(dataset: Dataset,
-                   src_vocab: Vocabulary,
-                   trg_vocab: Vocabulary,
                    batch_size: int,
                    batch_type: str = "sentence",
                    batch_class: Batch = Batch,
                    seed: int = 42,
                    shuffle: bool = False,
-                   num_workers: int = 0) -> DataLoader:
+                   num_workers: int = 0,
+                   pad_index: int = PAD_ID,
+                   device: torch.device = torch.device("cpu")) -> DataLoader:
     """
     Returns a torch DataLoader for a torch Dataset. (no bucketing)
 
     :param dataset: torch dataset containing src and optionally trg
-    :param src_vocab:
-    :param trg_vocab:
-    :param batch_class: joeynmt batch class
     :param batch_size: size of the batches the iterator prepares
     :param batch_type: measure batch size by sentence count or by token count
+    :param batch_class:
     :param seed: random seed for shuffling
     :param shuffle: whether to shuffle the data before each epoch
         (no effect if set to True for testing)
     :param num_workers: number of cpus for multiprocessing
+    :param pad_index:
+    :param device:
     :return: torch DataLoader
     """
     # sampler
@@ -169,70 +295,16 @@ def make_data_iter(dataset: Dataset,
         batch_sampler = TokenBatchSampler(sampler,
                                           batch_size=batch_size,
                                           drop_last=False)
-
-    pad_index = src_vocab.stoi[PAD_TOKEN]
-
-    def collate_fn(batch) -> Batch:
-        src_list, trg_list = zip(*batch)
-        src, src_length = src_vocab.sentences_to_ids(src_list)
-        trg, trg_length = None, None
-        if any(map(None.__ne__, trg_list)):
-            trg, trg_length = trg_vocab.sentences_to_ids(trg_list)
-
-        return batch_class(torch.LongTensor(src),
-                           torch.LongTensor(src_length),
-                           torch.LongTensor(trg) if trg else None,
-                           torch.LongTensor(trg_length) if trg_length else None,
-                           pad_index)
-
-    data_iter = DataLoader(dataset, batch_sampler=batch_sampler,
-                           collate_fn=collate_fn, num_workers=num_workers)
-
-    return data_iter
-
-
-def _read_data_file(path: Path, exts: Tuple[str, Union[str, None]],
-                    tokenize: Callable, lowercase: bool, max_len: int = -1) \
-        -> Tuple[List[List[str]], List[List[str]]]:
-    """
-    Read data files
-    :param path: data file path
-    :param exts: pair of file extensions
-    :param tokenize: tokenize function
-    :param lowercase: whether to lowercase or not
-    :param max_len: maximum length (longer instances will be filtered out)
-    :return: pair of tokenized sentence lists
-    """
-    s_lang, t_lang = exts
-    src_doc = path.with_suffix(f'.{s_lang}').read_text().strip().split('\n')
-    trg_doc = []
-    if t_lang:
-        trg_doc = path.with_suffix(f'.{t_lang}').read_text().strip().split('\n')
-        assert len(src_doc) == len(trg_doc)
-
-    src_tok, trg_tok = [], []
-    invalid = 0
-    for i, (s, t) in enumerate(zip_longest(src_doc, trg_doc)):
-        src = tokenize(s.strip().lower() if lowercase else s.strip())
-        if t: # parallel dataset
-            trg = tokenize(t.strip().lower() if lowercase else t.strip())
-            if (max_len < 0) or (len(src) <= max_len and len(trg) <= max_len):
-                src_tok.append(src)
-                trg_tok.append(trg)
-            else:
-                invalid += 1
-                logger.debug('Instance in line %d is too long. '
-                             'Exclude:\t%s\t%s', i, s, t)
-        else: # mono-lingual dataset
-            if max_len < 0 or len(src) <= max_len:
-                src_tok.append(src)
-            else:
-                invalid += 1
-                logger.debug('Instance in line %d is too long. '
-                             'Exclude:\t%s', i, s)
-    if invalid > 0:
-        logger.debug("\t%d instances were filtered out.", invalid)
-    return src_tok, trg_tok
+    # data iterator
+    return DataLoader(dataset,
+                      batch_sampler=batch_sampler,
+                      collate_fn=partial(collate_fn,
+                                         src_process=dataset.src_padding,
+                                         trg_process=dataset.trg_padding,
+                                         batch_class=batch_class,
+                                         pad_index=pad_index,
+                                         device=device),
+                      num_workers=num_workers)
 
 
 class TranslationDataset(Dataset):
@@ -246,6 +318,10 @@ class TranslationDataset(Dataset):
             assert len(src) == len(trg)
         self.src = src
         self.trg = trg
+
+        # assigned after vocab is built
+        self.src_padding = None
+        self.trg_padding = None
 
     def token_batch_size_fn(self, idx) -> int:
         """

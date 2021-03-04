@@ -3,7 +3,7 @@
 """
 Vocabulary module
 """
-from collections import defaultdict, Counter
+from collections import Counter
 import functools
 import operator
 from pathlib import Path
@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import List, Tuple
 import numpy as np
 
-from joeynmt.constants import UNK_TOKEN, DEFAULT_UNK_ID, \
-    EOS_TOKEN, BOS_TOKEN, PAD_TOKEN
+from joeynmt.constants import UNK_TOKEN, EOS_TOKEN, BOS_TOKEN, PAD_TOKEN, \
+    UNK_ID, PAD_ID, BOS_ID, EOS_ID
 
 
 class Vocabulary:
@@ -28,18 +28,27 @@ class Vocabulary:
         :param tokens: list of tokens
         :param file: file to load vocabulary from
         """
-        # don't rename stoi and itos since needed for torchtext
         # warning: stoi grows with unknown tokens, don't use for saving or size
 
         # special symbols
         self.specials = [UNK_TOKEN, PAD_TOKEN, BOS_TOKEN, EOS_TOKEN]
 
-        self.stoi = defaultdict(DEFAULT_UNK_ID)
-        self.itos = []
+        # don't allow to access _stoi and _itos outside of this class
+        self._stoi = {} # string to index
+        self._itos = [] # index to string
         if tokens is not None:
             self._from_list(tokens)
         elif file is not None:
             self._from_file(file)
+
+        # assign after stoi is built
+        self.pad_index = self.lookup(PAD_TOKEN)
+        self.bos_index = self.lookup(BOS_TOKEN)
+        self.eos_index = self.lookup(EOS_TOKEN)
+        assert self.pad_index == PAD_ID
+        assert self.bos_index == BOS_ID
+        assert self.eos_index == EOS_ID
+        assert self._itos[UNK_ID] == UNK_TOKEN
 
     def _from_list(self, tokens: List[str] = None) -> None:
         """
@@ -50,7 +59,7 @@ class Vocabulary:
         :param tokens: list of tokens
         """
         self.add_tokens(tokens=self.specials+tokens)
-        assert len(self.stoi) == len(self.itos)
+        assert len(self._stoi) == len(self._itos)
 
     def _from_file(self, file: Path) -> None:
         """
@@ -66,7 +75,7 @@ class Vocabulary:
         self._from_list(tokens)
 
     def __str__(self) -> str:
-        return self.stoi.__str__()
+        return self._stoi.__str__()
 
     def to_file(self, file: Path) -> None:
         """
@@ -75,7 +84,7 @@ class Vocabulary:
         :param file: path to file where the vocabulary is written
         """
         with file.open("w") as open_file:
-            for t in self.itos:
+            for t in self._itos:
                 open_file.write(f"{t}\n")
 
     def add_tokens(self, tokens: List[str]) -> None:
@@ -85,11 +94,11 @@ class Vocabulary:
         :param tokens: list of tokens to add to the vocabulary
         """
         for t in tokens:
-            new_index = len(self.itos)
+            new_index = len(self._itos)
             # add to vocab if not already there
-            if t not in self.itos:
-                self.itos.append(t)
-                self.stoi[t] = new_index
+            if t not in self._itos:
+                self._itos.append(t)
+                self._stoi[t] = new_index
 
     def is_unk(self, token: str) -> bool:
         """
@@ -98,10 +107,19 @@ class Vocabulary:
         :param token:
         :return: True if covered, False otherwise
         """
-        return self.stoi[token] == DEFAULT_UNK_ID()
+        return self.lookup(token) == UNK_ID
+
+    def lookup(self, token: str) -> int:
+        """
+        look up the encoding dictionary.
+        (needed for multiprocessing)
+        :param token: surface str
+        :return: token id
+        """
+        return self._stoi.get(token, UNK_ID)
 
     def __len__(self) -> int:
-        return len(self.itos)
+        return len(self._itos)
 
     def array_to_sentence(self, array: np.array, cut_at_eos=True,
                           skip_pad=True) -> List[str]:
@@ -116,7 +134,7 @@ class Vocabulary:
         """
         sentence = []
         for i in array:
-            s = self.itos[i]
+            s = self._itos[i]
             if cut_at_eos and s == EOS_TOKEN:
                 break
             if skip_pad and s == PAD_TOKEN:
@@ -149,30 +167,32 @@ class Vocabulary:
         :param sentences: list of tokenized sentences
         :return: padded ids and lengths
         """
-        bos = self.stoi[BOS_TOKEN]
-        eos = self.stoi[EOS_TOKEN]
         max_len = max([len(sent) for sent in sentences]) + 2
         padded, lengths = [], []
         for sent in sentences:
-            ids = [bos] + [self.stoi[s] for s in sent] + [eos]
+            encoded = [self.lookup(s) for s in sent]
+            ids = [self.bos_index] + encoded + [self.eos_index]
             offset = max(0, max_len - len(ids))
-            padded.append(ids + [self.stoi[PAD_TOKEN]] * offset)
+            padded.append(ids + [self.pad_index] * offset)
             lengths.append(len(ids))
         return padded, lengths
+
+    def log_vocab(self, k: int) -> str:
+        """first k vocab entities"""
+        return " ".join(f'({i}) {t}' for i, t in enumerate(self._itos[:k]))
 
 
 def build_vocab(max_size: int, min_freq: int, tokens: List[List[str]],
                 vocab_file: Path = None) -> Vocabulary:
     """
-    Builds vocabulary for a torchtext `field` from given`dataset` or
-    `vocab_file`.
+    Builds vocabulary from given `tokens` list or `vocab_file`.
 
     :param max_size: maximum size of vocabulary
     :param min_freq: minimum frequency for an item to be included
     :param tokens: list of tokenized sentences (raw dataset)
     :param vocab_file: file to store the vocabulary,
         if not None, load vocabulary from here
-    :return: Vocabulary created from either `dataset` or `vocab_file`
+    :return: Vocabulary created from either `tokens` or `vocab_file`
     """
 
     if vocab_file is not None:
@@ -195,7 +215,8 @@ def build_vocab(max_size: int, min_freq: int, tokens: List[List[str]],
             tokens_and_frequencies.sort(key=lambda tup: tup[1], reverse=True)
             return [i[0] for i in tokens_and_frequencies[:limit]]
 
-        counter = Counter(functools.reduce(operator.iconcat, tokens, []))
+        token_list = functools.reduce(operator.iconcat, tokens, []) # flatten
+        counter = Counter(token_list)
         if min_freq > -1:
             counter = filter_min(counter, min_freq)
         vocab_tokens = sort_and_cut(counter, max_size)
@@ -203,7 +224,6 @@ def build_vocab(max_size: int, min_freq: int, tokens: List[List[str]],
 
         vocab = Vocabulary(tokens=vocab_tokens)
         assert len(vocab) <= max_size + len(vocab.specials)
-        assert vocab.itos[DEFAULT_UNK_ID()] == UNK_TOKEN
 
     # check for all except for UNK token whether they are OOVs
     for s in vocab.specials[1:]:

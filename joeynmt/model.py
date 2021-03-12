@@ -234,7 +234,7 @@ def build_model(cfg: dict = None,
     # this ties source and target embeddings
     # for softmax layer tying, see further below
     if cfg.get("tied_embeddings", False):
-        if src_vocab.itos == trg_vocab.itos:
+        if src_vocab == trg_vocab:
             # share embeddings for src and trg
             trg_embed = src_embed
         else:

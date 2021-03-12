@@ -18,7 +18,7 @@ from joeynmt.model import build_model, Model, _DataParallel
 from joeynmt.search import run_batch
 from joeynmt.batch import Batch
 from joeynmt.data import load_data, make_data_iter, TranslationDataset, \
-    read_data_file
+    read_data_file, _tokenize
 from joeynmt.vocabulary import Vocabulary
 
 logger = logging.getLogger(__name__)
@@ -113,7 +113,7 @@ def validate_on_data(model: Model, data: Dataset,
                 for n in range(0, n_best):
                     sort_reverse_index[i].append(ix + n)
 
-            assert len(sort_reverse_index) == len(data)
+            assert len(sort_reverse_index) == batch.nseqs
 
             # run as during training to get validation loss (e.g. xent)
             if compute_loss and batch.trg is not None:
@@ -133,15 +133,15 @@ def validate_on_data(model: Model, data: Dataset,
             # sort outputs back to original order
             for reverse_index in sort_reverse_index:
                 all_outputs.append(output[reverse_index])
-                valid_attention_scores.append(
-                    attention_scores[reverse_index]
-                    if attention_scores is not None else [])
+                if attention_scores is not None:
+                    valid_attention_scores.append(
+                        attention_scores[reverse_index])
 
         assert len(all_outputs) == len(data)
 
         if compute_loss and total_ntokens > 0:
             # total validation loss
-            valid_loss = total_loss
+            valid_loss = total_loss / total_nseqs
             # exponent of token-level negative log prob
             valid_ppl = torch.exp(total_loss / total_ntokens)
         else:
@@ -305,11 +305,12 @@ def test(cfg_file,
 
     # when checkpoint is not specified, take latest (best) from model dir
     if ckpt is None:
-        ckpt = get_latest_checkpoint(model_dir)
-        try:
-            step = ckpt.stem
-        except IndexError:
-            step = "best"
+        ckpt = cfg["training"].get("load_model", None)
+        if ckpt is None:
+            if (model_dir / "best.ckpt").is_file():
+                ckpt = model_dir / "best.ckpt"
+            else:
+                ckpt = get_latest_checkpoint(model_dir)
 
     # load model state from disk
     model_checkpoint = load_checkpoint(Path(ckpt), device=device)
@@ -350,7 +351,7 @@ def test(cfg_file,
 
         if save_attention:
             if attention_scores:
-                attention_name = f"{data_set_name}.{step}.att"
+                attention_name = f"{data_set_name}.{ckpt.stem}.att"
                 attention_path = (model_dir / attention_name).as_posix()
                 logger.info("Saving attention plots. This might take a while..")
                 store_attention_plots(attentions=attention_scores,
@@ -411,7 +412,13 @@ def translate(cfg_file: str,
 
     # when checkpoint is not specified, take oldest from model dir
     if ckpt is None:
-        ckpt = get_latest_checkpoint(model_dir)
+        if ckpt is None:
+            ckpt = cfg["training"].get("load_model", None)
+        if ckpt is None:
+            if (model_dir / "best.ckpt").is_file():
+                ckpt = model_dir / "best.ckpt"
+            else:
+                ckpt = get_latest_checkpoint(model_dir)
 
     # read vocabs
     src_vocab_file = cfg["data"].get("src_vocab", model_dir / "src_vocab.txt")
@@ -424,8 +431,6 @@ def translate(cfg_file: str,
     level = data_cfg["level"]
     lowercase = data_cfg["lowercase"]
     test_path = data_cfg.get("test", None)
-
-    tok_fun = lambda s: list(s) if level == "char" else s.split()
 
     # parse test args
     batch_size, batch_type, use_cuda, device, n_gpu, level, _, \
@@ -445,9 +450,11 @@ def translate(cfg_file: str,
     if not sys.stdin.isatty():
         # input file given
         assert test_path is not None, "Test file is not given."
-        test_src, _ = read_data_file(Path(test_path), (src_lang, None),
-                                      tok_fun, lowercase)
-        test_data = TranslationDataset(test_src)
+        test_src, _ = read_data_file(path=Path(test_path),
+                                     exts=(src_lang, None),
+                                     level=level,
+                                     lowercase=lowercase)
+        test_data = TranslationDataset(test_src, None)
         all_hypotheses = _translate_data(test_data)
 
         if output_path is not None:
@@ -491,7 +498,8 @@ def translate(cfg_file: str,
                     break
 
                 # every line has to be made into dataset
-                test_data = TranslationDataset([tok_fun(src_input)])
+                test_src = [_tokenize(src_input, level, lowercase)]
+                test_data = TranslationDataset(test_src, None)
                 hypotheses = _translate_data(test_data)
 
                 print("JoeyNMT: Hypotheses ranked by score")

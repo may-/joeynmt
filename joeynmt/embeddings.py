@@ -95,7 +95,7 @@ class Embeddings(nn.Module):
                 "Embedding dimension doesn't match."
             for line in f_embed.readlines():
                 tokens = line.rstrip().split(' ')
-                if tokens[0] in vocab.stoi.keys():
+                if tokens[0] in vocab._stoi.keys():
                     embed_dict[tokens[0]] = torch.FloatTensor(
                         [float(t) for t in tokens[1:]])
 
@@ -106,7 +106,7 @@ class Embeddings(nn.Module):
 
         # assign
         for idx in range(len(vocab)):
-            token = vocab.itos[idx]
+            token = vocab._itos[idx]
             if token in embed_dict:
                 assert self.embedding_dim == len(embed_dict[token])
                 self.lut.weight.data[idx] = embed_dict[token]

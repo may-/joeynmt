@@ -121,6 +121,11 @@ class Vocabulary:
     def __len__(self) -> int:
         return len(self._itos)
 
+    def __eq__(self, other) -> bool:
+        if isinstance(other, Vocabulary):
+            return self._itos == other._itos
+        return False
+
     def array_to_sentence(self, array: np.array, cut_at_eos=True,
                           skip_pad=True) -> List[str]:
         """

@@ -155,12 +155,8 @@ def log_data_info(train_data: Dataset, valid_data: Dataset, test_data: Dataset,
                     " ".join(train_data.src[0]),
                     " ".join(train_data.trg[0]))
 
-    logger.info(
-        "First 10 Src tokens: %s",
-        " ".join('(%d) %s' % (i, t) for i, t in enumerate(src_vocab.itos[:10])))
-    logger.info(
-        "First 10 Trg tokens: %s",
-        " ".join('(%d) %s' % (i, t) for i, t in enumerate(trg_vocab.itos[:10])))
+    logger.info("First 10 Src tokens: %s", src_vocab.log_vocab(10))
+    logger.info("First 10 Trg tokens: %s", trg_vocab.log_vocab(10))
 
     logger.info("Number of unique Src tokens (vocab_size): %d", len(src_vocab))
     logger.info("Number of unique Trg tokens (vocab_size): %d", len(trg_vocab))
@@ -337,24 +333,25 @@ def delete_ckpt(to_delete: Path) -> None:
         #raise e
 
 
-def symlink_update(target: Path, link_name: str) -> Optional[Path]:
+def symlink_update(target: Path, link_name: Path) -> Optional[Path]:
     """
     This function finds the file that the symlink currently points to, sets it
     to the new target, and returns the previous target if it exists.
 
     :param target: A path to a file that we want the symlink to point to.
+                    no parent dir, filename only, i.e. "10000.ckpt"
     :param link_name: This is the name of the symlink that we want to update.
+                    link name with parent dir, i.e. "models/my_model/best.ckpt"
 
     :return:
         - current_last: This is the previous target of the symlink, before it is
             updated in this function. If the symlink did not exist before or did
             not have a target, None is returned instead.
     """
-    link = Path(link_name)
-    if link.is_symlink():
-        current_last = link.resolve()
-        link.unlink()
-        link.symlink_to(target)
+    if link_name.is_symlink():
+        current_last = link_name.resolve()
+        link_name.unlink()
+        link_name.symlink_to(target)
         return current_last
-    link.symlink_to(target)
+    link_name.symlink_to(target)
     return None

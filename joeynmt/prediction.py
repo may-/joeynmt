@@ -35,7 +35,8 @@ def validate_on_data(model: Model, data: Dataset,
                      batch_type: str = "sentence",
                      postprocess: bool = True,
                      bpe_type: str = "subword-nmt",
-                     sacrebleu: dict = None) \
+                     sacrebleu: dict = None,
+                     n_best: int = 1) \
         -> (float, float, float, List[str], List[List[str]], List[str],
             List[str], List[List[str]], List[np.array]):
     """
@@ -62,6 +63,7 @@ def validate_on_data(model: Model, data: Dataset,
     :param postprocess: if True, remove BPE segmentation from translations
     :param bpe_type: bpe type, one of {"subword-nmt", "sentencepiece"}
     :param sacrebleu: sacrebleu options
+    :param n_best: Amount of candidates to return
 
     :return:
         - current_valid_score: current validation score [eval_metric],
@@ -105,7 +107,13 @@ def validate_on_data(model: Model, data: Dataset,
         total_nseqs = 0
         for batch in valid_iter:
             # sort batch now by src length and keep track of order
-            sort_reverse_index = batch.sort_by_src_length()
+            reverse_indexes = batch.sort_by_src_length()
+            sort_reverse_index = [[] for _ in range(len(reverse_indexes))]
+            for i, ix in enumerate(reverse_indexes):
+                for n in range(0, n_best):
+                    sort_reverse_index[i].append(ix + n)
+
+            assert len(sort_reverse_index) == len(data)
 
             # run as during training to get validation loss (e.g. xent)
             if compute_loss and batch.trg is not None:
@@ -119,13 +127,15 @@ def validate_on_data(model: Model, data: Dataset,
             # run as during inference to produce translations
             output, attention_scores = run_batch(
                 model=model, batch=batch, beam_size=beam_size,
-                beam_alpha=beam_alpha, max_output_length=max_output_length)
+                beam_alpha=beam_alpha, max_output_length=max_output_length,
+                n_best=n_best)
 
             # sort outputs back to original order
-            all_outputs.extend(output[sort_reverse_index])
-            valid_attention_scores.extend(
-                attention_scores[sort_reverse_index]
-                if attention_scores is not None else [])
+            for reverse_index in sort_reverse_index:
+                all_outputs.append(output[reverse_index])
+                valid_attention_scores.append(
+                    attention_scores[reverse_index]
+                    if attention_scores is not None else [])
 
         assert len(all_outputs) == len(data)
 
@@ -139,8 +149,11 @@ def validate_on_data(model: Model, data: Dataset,
             valid_ppl = -1
 
         # decode back to symbols
-        decoded_valid = model.trg_vocab.arrays_to_sentences(arrays=all_outputs,
-                                                            cut_at_eos=True)
+        decoded_valid = model.trg_vocab.arrays_to_sentences(
+            arrays=[output for output_group in all_outputs
+                    for output in output_group],
+            cut_at_eos=True
+        )
 
         # evaluate with metric on full dataset
         join_char = " " if level in ["word", "bpe"] else ""
@@ -362,7 +375,8 @@ def test(cfg_file,
 
 def translate(cfg_file: str,
               ckpt: str,
-              output_path: str = None) -> None:
+              output_path: str = None,
+              n_best: int = 1) -> None:
     """
     Interactive translation function.
     Loads model from checkpoint and translates either the stdin input or
@@ -374,6 +388,7 @@ def translate(cfg_file: str,
     :param cfg_file: path to configuration file
     :param ckpt: path to checkpoint to load
     :param output_path: path to output file
+    :param n_best: amount of candidates to display
     """
     def _translate_data(test_data):
         """ Translates given dataset, using parameters from outer scope. """
@@ -385,7 +400,7 @@ def translate(cfg_file: str,
             max_output_length=max_output_length, eval_metric="",
             device=device, compute_loss=False, beam_size=beam_size,
             beam_alpha=beam_alpha, postprocess=postprocess,
-            bpe_type=bpe_type, sacrebleu=sacrebleu, n_gpu=n_gpu)
+            bpe_type=bpe_type, sacrebleu=sacrebleu, n_gpu=n_gpu, n_best=n_best)
         return hypotheses
 
     cfg = load_config(Path(cfg_file))
@@ -433,19 +448,38 @@ def translate(cfg_file: str,
         test_src, _ = read_data_file(Path(test_path), (src_lang, None),
                                       tok_fun, lowercase)
         test_data = TranslationDataset(test_src)
-        hypotheses = _translate_data(test_data)
+        all_hypotheses = _translate_data(test_data)
 
         if output_path is not None:
             # write to outputfile if given
-            output_path_set = Path(output_path).with_suffix(".hyp")
-            with output_path_set.open(mode="w", encoding="utf-8") as out_file:
-                for hyp in hypotheses:
-                    out_file.write(f"{hyp}\n")
-            logger.info("Translations saved to: %s.", output_path_set)
+            outpath_set = Path(output_path)
+
+            def write_to_file(output_path_set, hypotheses):
+                with output_path_set.open(mode="w", encoding="utf-8") \
+                        as out_file:
+                    for hyp in hypotheses:
+                        out_file.write(f"{hyp}\n")
+                logger.info("Translations saved to: %s.", output_path_set)
+
+            if n_best > 1:
+                for n in range(n_best):
+                    write_to_file(
+                        Path(outpath_set.parent / outpath_set.stem / f"-{n}") \
+                            .with_suffix(outpath_set.suffix),
+                        [all_hypotheses[i]
+                         for i in range(n, len(all_hypotheses), n_best)]
+                    )
+            else:
+                write_to_file(outpath_set, all_hypotheses)
+
         else:
             # print to stdout
-            for hyp in hypotheses:
-                print(hyp)
+            for hyp in all_hypotheses:
+                if n_best > 1:
+                    for n, h in enumerate(hyp):
+                        print(f"{n}_best:", h)
+                else:
+                    print(hyp)
 
     else:
         # enter interactive mode
@@ -461,7 +495,10 @@ def translate(cfg_file: str,
                 # every line has to be made into dataset
                 test_data = TranslationDataset([tok_fun(src_input)])
                 hypotheses = _translate_data(test_data)
-                print("JoeyNMT: {}".format(hypotheses[0]))
+
+                print("JoeyNMT: Hypotheses ranked by score")
+                for i, hyp in enumerate(hypotheses):
+                    print("JoeyNMT #{}: {}".format(i + 1, hyp))
 
             except (KeyboardInterrupt, EOFError):
                 print("\nBye.")

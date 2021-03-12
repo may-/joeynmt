@@ -452,7 +452,7 @@ def translate(cfg_file: str,
 
         if output_path is not None:
             # write to outputfile if given
-            outpath_set = Path(output_path)
+            output_path_set = Path(output_path)
 
             def write_to_file(output_path_set, hypotheses):
                 with output_path_set.open(mode="w", encoding="utf-8") \
@@ -463,23 +463,21 @@ def translate(cfg_file: str,
 
             if n_best > 1:
                 for n in range(n_best):
+                    file_name = output_path_set.stem
+                    file_extension = output_path_set.suffix
                     write_to_file(
-                        Path(outpath_set.parent / outpath_set.stem / f"-{n}") \
-                            .with_suffix(outpath_set.suffix),
+                        Path(output_path_set.parent / file_name / f"-{n}") \
+                            .with_suffix(file_extension),
                         [all_hypotheses[i]
                          for i in range(n, len(all_hypotheses), n_best)]
                     )
             else:
-                write_to_file(outpath_set, all_hypotheses)
+                write_to_file(output_path_set, all_hypotheses)
 
         else:
             # print to stdout
             for hyp in all_hypotheses:
-                if n_best > 1:
-                    for n, h in enumerate(hyp):
-                        print(f"{n}_best:", h)
-                else:
-                    print(hyp)
+                print(hyp)
 
     else:
         # enter interactive mode

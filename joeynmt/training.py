@@ -9,7 +9,7 @@ import shutil
 from typing import List
 import logging
 import sys
-import collections
+import heapq
 from pathlib import Path
 import numpy as np
 
@@ -71,8 +71,6 @@ class TrainManager:
         self.tb_writer = SummaryWriter(
             log_dir=(self.model_dir / "tensorboard").as_posix())
 
-        self.save_latest_checkpoint = train_config.get("save_latest_ckpt", True)
-
         # model
         self.model = model
         self.model.log_parameters_list()
@@ -98,9 +96,6 @@ class TrainManager:
         # validation & early stopping
         self.validation_freq = train_config.get("validation_freq", 1000)
         self.log_valid_sents = train_config.get("print_valid_sents", [0, 1, 2])
-        maxlen = train_config.get("keep_last_ckpts", 5)
-        self.ckpt_queue = collections.deque(
-            maxlen=maxlen if maxlen > 0 else None)
         self.eval_metric = train_config.get("eval_metric", "bleu")
         if self.eval_metric not in [
                 'bleu', 'chrf', 'token_accuracy', 'sequence_accuracy'
@@ -129,6 +124,17 @@ class TrainManager:
             raise ConfigurationError(
                 "Invalid setting for 'early_stopping_metric', "
                 "valid options: 'loss', 'ppl', 'eval_metric'.")
+
+        # save/delete checkpoints
+        self.num_ckpts = train_config.get("num_ckpts", 5)
+        self.keep_ckpts = train_config.get("keep_ckpts", "best")
+        if self.keep_ckpts not in ["best", "last"]:
+            raise ConfigurationError("Invalid setting for 'keep_ckpts', "
+                                     "valid options: 'best', 'last'.")
+        self.ckpt_queue = []
+            #heapq._heapify_max([]) \   # max heap queue
+            #if self.keep_ckpts == "best" and self.minimize_metric \
+            #else heapq.heapify([])     # min heap queue
 
         # eval options
         test_config = config["testing"]
@@ -218,7 +224,7 @@ class TrainManager:
         if self.n_gpu > 1:
             self.model = _DataParallel(self.model)
 
-    def _save_checkpoint(self, new_best: bool = True) -> None:
+    def _save_checkpoint(self) -> None:
         """
         Save the model's current parameters and the training state to a
         checkpoint.
@@ -227,9 +233,6 @@ class TrainManager:
         the total number of training tokens,
         the best checkpoint score and iteration so far,
         and optimizer and scheduler states.
-
-        :param new_best: This boolean signals which symlink we will use for the
-          new checkpoint. If it is true, we update best.ckpt, else latest.ckpt.
         """
         model_path = self.model_dir / f"{self.stats.steps}.ckpt"
         logger.info("Saving new checkpoint: %s", model_path)
@@ -250,35 +253,36 @@ class TrainManager:
             self.train_iter.batch_sampler.sampler.generator.get_state()
         }
         torch.save(state, model_path.as_posix())
+
+        # push to and pop from the heap queue
+        if self.num_ckpts > 0:
+            heap_key = self.stats.best_ckpt_score if self.keep_ckpts == "best" \
+                else self.stats.steps
+            if len(self.ckpt_queue) < self.num_ckpts: # no pop, push only
+                heapq.heappush(self.ckpt_queue, (heap_key, model_path))
+            else: # pop the oldest / worst one in the queue
+                if self.keep_ckpts == "best" and self.minimize_metric:
+                    to_delete = heapq._heappushpop_max(self.ckpt_queue,
+                                                       (heap_key, model_path))
+                else: #if self.keep_ckpts == "last" or
+                    # (self.keep_ckpts == "best" and not self.minimize_metric):
+                    to_delete = heapq.heappushpop(self.ckpt_queue,
+                                                  (heap_key, model_path))
+                assert to_delete[1] != model_path # don't delete the latest one
+                delete_ckpt(to_delete[1])
+
+            assert len(self.ckpt_queue) <= self.num_ckpts
+
+        # update symlink and delete old ckpts
         symlink_target = f"{self.stats.steps}.ckpt"
-        if new_best:
-            if self.ckpt_queue.maxlen is not None and \
-                    len(self.ckpt_queue) == self.ckpt_queue.maxlen:
-                to_delete = self.ckpt_queue.popleft()  # delete oldest ckpt
-                delete_ckpt(to_delete)
-
-            self.ckpt_queue.append(model_path)
-
-            best_path = self.model_dir / "best.ckpt"
-            try:
-                # create/modify symbolic link for best checkpoint
-                symlink_update(symlink_target, best_path)
-            except OSError:
-                # overwrite best.ckpt
-                torch.save(state, best_path)
-
-        if self.save_latest_checkpoint:
-            last_path = self.model_dir / "latest.ckpt"
-            previous_path = symlink_update(symlink_target, last_path)
-            # If the last ckpt is in the ckpt_queue, we don't want to delete it.
-            if self.ckpt_queue.maxlen is not None:
-                can_delete = True
-                for ckpt_path in self.ckpt_queue:
-                    if Path(ckpt_path).resolve() == previous_path:
-                        can_delete = False
-                        break
-                if can_delete and previous_path is not None:
-                    delete_ckpt(previous_path)
+        if self.keep_ckpts == "last":
+            last_path = self.model_dir / "last.ckpt"
+            symlink_update(symlink_target, last_path) # update last symlink
+        elif self.keep_ckpts == "best":
+            if len(self.ckpt_queue) == 0:
+                best_path = self.model_dir / "best.ckpt"
+                symlink_update(symlink_target, best_path) # update best symlink
+        assert len(self.ckpt_queue) <= self.num_ckpts
 
     def init_from_checkpoint(self,
                              path: Path,
@@ -590,6 +594,7 @@ class TrainManager:
                 and self.scheduler_step_at == "validation":
             self.scheduler.step(ckpt_score)
 
+        # update new best
         new_best = False
         if self.stats.is_best(ckpt_score):
             self.stats.best_ckpt_score = ckpt_score
@@ -597,9 +602,11 @@ class TrainManager:
             logger.info('Hooray! New best validation result [%s]!',
                         self.early_stopping_metric)
             new_best = True
-            self._save_checkpoint(new_best)
-        elif self.save_latest_checkpoint:
-            self._save_checkpoint(new_best)
+
+        # save checkpoints
+        if self.keep_ckpts == "last" \
+                or (self.keep_ckpts == "best" and new_best):
+            self._save_checkpoint()
 
         # append to validation report
         self._add_report(valid_score=valid_score,

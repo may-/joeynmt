@@ -1,6 +1,6 @@
 future
-pillow
-numpy
+pillow 
+numpy>=1.20.1
 setuptools>=41.0.0
 torch>=1.8.0
 tensorboard>=1.15
@@ -10,5 +10,5 @@ matplotlib
 seaborn
 pyyaml>=5.1
 pylint>=2.7.2
-six==1.12
-wrapt==1.11.1
+six>=1.12
+wrapt>=1.11.1

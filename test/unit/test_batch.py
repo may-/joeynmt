@@ -191,5 +191,3 @@ class TestBatch(TensorTestCase):
             total_samples += b.nseqs
             self.assertLessEqual(b.nseqs, batch_size)
         self.assertEqual(total_samples, len(self.dev_data))
-
-

@@ -21,6 +21,7 @@ class TestBatch(TensorTestCase):
         # load the data
         self.train_data, self.dev_data, _, self.src_vocab, self.trg_vocab \
             = load_data(data_cfg)
+        self.pad_index = self.trg_vocab.pad_index
         # random seeds
         self.seed = 42
 
@@ -30,14 +31,14 @@ class TestBatch(TensorTestCase):
         self.assertEqual(len(self.train_data), 27)
 
         # make data iterator
-        train_iter = make_data_iter(self.train_data,
-                                    src_vocab=self.src_vocab,
-                                    trg_vocab=self.trg_vocab,
+        train_iter = make_data_iter(dataset=self.train_data,
                                     batch_size=batch_size,
                                     batch_type="sentence",
                                     batch_class=Batch,
                                     shuffle=True,
                                     seed=self.seed,
+                                    pad_index=self.pad_index,
+                                    device=torch.device('cpu'),
                                     num_workers=0)
         self.assertTrue(isinstance(train_iter, DataLoader))
         self.assertEqual(train_iter.batch_sampler.batch_size, batch_size)
@@ -87,14 +88,14 @@ class TestBatch(TensorTestCase):
         self.assertEqual(len(self.train_data), 27)
 
         # make data iterator
-        train_iter = make_data_iter(self.train_data,
-                                    src_vocab=self.src_vocab,
-                                    trg_vocab=self.trg_vocab,
+        train_iter = make_data_iter(dataset=self.train_data,
                                     batch_size=batch_size,
                                     batch_type="token",
                                     batch_class=Batch,
                                     shuffle=True,
                                     seed=self.seed,
+                                    pad_index=self.pad_index,
+                                    device=torch.device('cpu'),
                                     num_workers=0)
         self.assertTrue(isinstance(train_iter, DataLoader))
         self.assertEqual(train_iter.batch_sampler.batch_size, batch_size)
@@ -139,13 +140,13 @@ class TestBatch(TensorTestCase):
         self.assertEqual(len(self.dev_data), 20)
 
         # make data iterator
-        dev_iter = make_data_iter(self.dev_data,
-                                  src_vocab=self.src_vocab,
-                                  trg_vocab=self.trg_vocab,
+        dev_iter = make_data_iter(dataset=self.dev_data,
                                   batch_size=batch_size,
                                   batch_type="sentence",
                                   batch_class=Batch,
-                                  shuffle=False)
+                                  shuffle=False,
+                                  pad_index=self.pad_index,
+                                  device=torch.device('cpu'))
         self.assertTrue(isinstance(dev_iter, DataLoader))
         self.assertEqual(dev_iter.batch_sampler.batch_size, batch_size)
         self.assertTrue(isinstance(dev_iter.batch_sampler, BatchSampler))

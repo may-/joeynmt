@@ -26,13 +26,13 @@ class TestVocabulary(unittest.TestCase):
                               ' ', ',', '.', 'D', 'G', 'K', 'M', 'T', 'W', 'a',
                               'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'k', 'l',
                               'm', 'n', 'o', 'r', 's', 't', 'u', 'v', 'w', '–']
-        self.assertEqual(self.char_vocab.itos, expected_char_itos)
+        self.assertEqual(self.char_vocab._itos, expected_char_itos)
         expected_word_itos = ['<unk>', '<pad>', '<s>', '</s>',
                               'Die', 'Geschichte', 'Kinokassenrekorde', 'Meer',
                               'Titanic', 'Wahrheit', 'alle', 'aufregendste',
                               'bricht', 'dass', 'die', 'gerade', 'ist,', 'ist.',
                               'nicht', 'obwohl', 'sie', 'vom', '–']
-        self.assertEqual(self.word_vocab.itos, expected_word_itos)
+        self.assertEqual(self.word_vocab._itos, expected_word_itos)
 
     def testVocabularyFromFile(self):
         # write vocabs to file and create new ones from those files
@@ -41,8 +41,8 @@ class TestVocabulary(unittest.TestCase):
 
         word_vocab2 = Vocabulary(file=self.temp_file_word)
         char_vocab2 = Vocabulary(file=self.temp_file_char)
-        self.assertEqual(self.word_vocab.itos, word_vocab2.itos)
-        self.assertEqual(self.char_vocab.itos, char_vocab2.itos)
+        self.assertEqual(self.word_vocab, word_vocab2)
+        self.assertEqual(self.char_vocab, char_vocab2)
         self.temp_file_char.unlink()
         self.temp_file_word.unlink()
 

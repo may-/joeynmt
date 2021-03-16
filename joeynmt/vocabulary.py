@@ -4,8 +4,6 @@
 Vocabulary module
 """
 from collections import Counter
-import functools
-import operator
 from pathlib import Path
 
 from typing import List, Tuple
@@ -13,6 +11,7 @@ import numpy as np
 
 from joeynmt.constants import UNK_TOKEN, EOS_TOKEN, BOS_TOKEN, PAD_TOKEN, \
     UNK_ID, PAD_ID, BOS_ID, EOS_ID
+from joeynmt.helpers import flatten
 
 
 class Vocabulary:
@@ -220,8 +219,7 @@ def build_vocab(max_size: int, min_freq: int, tokens: List[List[str]],
             tokens_and_frequencies.sort(key=lambda tup: tup[1], reverse=True)
             return [i[0] for i in tokens_and_frequencies[:limit]]
 
-        token_list = functools.reduce(operator.iconcat, tokens, []) # flatten
-        counter = Counter(token_list)
+        counter = Counter(flatten(tokens))
         if min_freq > -1:
             counter = filter_min(counter, min_freq)
         vocab_tokens = sort_and_cut(counter, max_size)

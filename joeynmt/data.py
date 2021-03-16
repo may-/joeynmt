@@ -2,10 +2,11 @@
 """
 Data module
 """
+from __future__ import annotations
 import sys
 from pathlib import Path
 from functools import partial
-from typing import Optional, List, Tuple, Union
+from typing import Optional, List, Tuple, Union, Callable
 import logging
 import numpy as np
 
@@ -24,18 +25,13 @@ logger = logging.getLogger(__name__)
 try:
     torch.multiprocessing.set_start_method('spawn')
 except RuntimeError as e:
-    logger.debug("torch.multiprocessing.set_start_method('spawn') faild.", e)
-    #pass
+    logger.debug("torch.multiprocessing.set_start_method('spawn') faild. %s", e)
 
 # pandas (for multiprocessing)
 try:
     import pandas as pd
 except ImportError as no_pd:
-    class pd:
-        DataFrame = None # dummy to escape "pd" not-defined error message
-    logger.debug('pandas package not found.', no_pd)
-
-
+    logger.debug('pandas package not found. %s', no_pd)
 
 
 def load_data(data_cfg: dict, datasets: list = None, num_workers: int = 0) \
@@ -53,13 +49,13 @@ def load_data(data_cfg: dict, datasets: list = None, num_workers: int = 0) \
     from the training set instead of the full training set.
 
     :param data_cfg: configuration dictionary for data
-        ("data" part of configuation file)
+        ("data" part of configuration file)
     :param datasets: list of dataset names to load
     :param num_workers:
     :return:
         - train_data: training dataset
         - dev_data: development dataset
-        - test_data: testdata set if given, otherwise None
+        - test_data: test dataset if given, otherwise None
         - src_vocab: source vocabulary extracted from training data
         - trg_vocab: target vocabulary extracted from training data
     """
@@ -135,9 +131,9 @@ def load_data(data_cfg: dict, datasets: list = None, num_workers: int = 0) \
                                           level=level,
                                           lowercase=lowercase,
                                           num_workers=num_workers)
-        dev_data = TranslationDataset(dev_src, dev_trg)
-        dev_data.src_padding = src_vocab.sentences_to_ids
-        dev_data.trg_padding = trg_vocab.sentences_to_ids
+        dev_data = TranslationDataset(dev_src, dev_trg,
+                                      src_padding=src_vocab.sentences_to_ids,
+                                      trg_padding=trg_vocab.sentences_to_ids)
 
     test_data = None
     if "test" in datasets and test_path is not None:
@@ -151,9 +147,9 @@ def load_data(data_cfg: dict, datasets: list = None, num_workers: int = 0) \
                                             level=level,
                                             lowercase=lowercase,
                                             num_workers=num_workers)
-        test_data = TranslationDataset(test_src, test_trg)
-        test_data.src_padding = src_vocab.sentences_to_ids
-        test_data.trg_padding = trg_vocab.sentences_to_ids
+        test_data = TranslationDataset(test_src, test_trg,
+                                       src_padding=src_vocab.sentences_to_ids,
+                                       trg_padding=trg_vocab.sentences_to_ids)
 
     logger.info("Data loaded.")
     log_data_info(train_data, dev_data, test_data, src_vocab, trg_vocab)
@@ -295,6 +291,10 @@ def make_data_iter(dataset: Dataset,
         batch_sampler = TokenBatchSampler(sampler,
                                           batch_size=batch_size,
                                           drop_last=False)
+
+    assert dataset.src_padding is not None
+    assert dataset.trg_padding is not None
+
     # data iterator
     return DataLoader(dataset,
                       batch_sampler=batch_sampler,
@@ -310,8 +310,14 @@ def make_data_iter(dataset: Dataset,
 class TranslationDataset(Dataset):
     """
     TranslationDataset which stores raw sentence pairs (tokenized)
+
+    :param src: list of tokenized sentences in src language
+    :param trg: list of tokenized sentences in trg language
+    :param src_padding: padding function for src
+    :param trg_padding: padding function for trg
     """
-    def __init__(self, src, trg=None):
+    def __init__(self, src: List[List[str]], trg: List[List[str]]=None,
+                 src_padding: Callable=None, trg_padding: Callable=None):
         if isinstance(trg, list) and len(trg) == 0:
             trg = None
         if trg is not None:
@@ -320,8 +326,8 @@ class TranslationDataset(Dataset):
         self.trg = trg
 
         # assigned after vocab is built
-        self.src_padding = None
-        self.trg_padding = None
+        self.src_padding = src_padding
+        self.trg_padding = trg_padding
 
     def token_batch_size_fn(self, idx) -> int:
         """

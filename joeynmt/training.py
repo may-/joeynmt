@@ -25,12 +25,11 @@ from joeynmt.helpers import load_config, log_cfg, store_attention_plots, \
     load_checkpoint, make_model_dir, make_logger, set_seed, symlink_update, \
     delete_ckpt, ConfigurationError
 from joeynmt.model import Model, _DataParallel
-from joeynmt.prediction import validate_on_data
+from joeynmt.prediction import validate_on_data, test
 from joeynmt.loss import XentLoss
 from joeynmt.data import load_data, make_data_iter
 from joeynmt.builders import build_optimizer, build_scheduler, \
     build_gradient_clipper
-from joeynmt.prediction import test
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +126,7 @@ class TrainManager:
 
         # save/delete checkpoints
         self.num_ckpts = train_config.get("num_ckpts", 5)
-        self.keep_ckpts = train_config.get("keep_ckpts", "best")
+        self.keep_ckpts = train_config.get("keep_ckpts", "last")
         if self.keep_ckpts not in ["best", "last"]:
             raise ConfigurationError("Invalid setting for 'keep_ckpts', "
                                      "valid options: 'best', 'last'.")
@@ -135,6 +134,12 @@ class TrainManager:
             #heapq._heapify_max([]) \   # max heap queue
             #if self.keep_ckpts == "best" and self.minimize_metric \
             #else heapq.heapify([])     # min heap queue
+
+        keep_latest_ckpts = train_config.get("keep_latest_ckpts", None)
+        if keep_latest_ckpts is not None: # backward compatibility
+            self.num_ckpts = keep_latest_ckpts
+            logger.warning("`keep_latest_ckpts` option is outdated. "
+                           "Please use `num_ckpts` and `keep_ckpts`, instead.")
 
         # eval options
         test_config = config["testing"]
@@ -261,12 +266,12 @@ class TrainManager:
         # update symlink
         symlink_target = Path(f"{self.stats.steps}.ckpt")
         # last symlink
-        last_path = self.model_dir / "last.ckpt"
-        prev_path = symlink_update(symlink_target, last_path)
+        last_path = self.model_dir / "latest.ckpt"
+        symlink_update(symlink_target, last_path)
         # best symlink
         best_path = self.model_dir / "best.ckpt"
         if new_best:
-            prev_path = symlink_update(symlink_target, best_path)
+            symlink_update(symlink_target, best_path)
             assert best_path.resolve().stem == str(self.stats.best_ckpt_iter)
 
         # push to and pop from the heap queue
@@ -277,8 +282,10 @@ class TrainManager:
                 heapq.heappush(self.ckpt_queue, (heap_key, model_path))
             else: # pop the oldest / worst one in the queue
                 if self.keep_ckpts == "best" and self.minimize_metric:
+                    # pylint: disable=protected-access
                     to_delete = heapq._heappushpop_max(self.ckpt_queue,
                                                        (heap_key, model_path))
+                    # pylint: enable=protected-access
                 else: #if self.keep_ckpts == "last" or
                     # (self.keep_ckpts == "best" and not self.minimize_metric):
                     to_delete = heapq.heappushpop(self.ckpt_queue,
@@ -287,7 +294,7 @@ class TrainManager:
 
             if to_delete is not None \
                     and to_delete[1].stem != best_path.resolve().stem:
-                delete_ckpt(to_delete[1])             # don't delete the best one
+                delete_ckpt(to_delete[1])         # don't delete the best one
 
             assert len(self.ckpt_queue) <= self.num_ckpts
 
@@ -346,7 +353,7 @@ class TrainManager:
                 and model_checkpoint.get('train_iter_state', None) is not None):
             self.train_iter_state = model_checkpoint["train_iter_state"]
         else:
-            logger.info("Reset data iterator (random seed: {%s}).", self.seed)
+            logger.info("Reset data iterator (random seed: {%d}).", self.seed)
 
         # move parameters to cuda
         if self.use_cuda:
@@ -612,7 +619,8 @@ class TrainManager:
                         self.early_stopping_metric)
 
         # save checkpoints
-        is_better = self.stats.is_better(ckpt_score, self.ckpt_queue)
+        is_better = self.stats.is_better(ckpt_score, self.ckpt_queue) \
+            if len(self.ckpt_queue) > 0 else True
         if self.keep_ckpts == "last" or \
                 (self.keep_ckpts == "best" and is_better):
             self._save_checkpoint(new_best, ckpt_score)
@@ -765,8 +773,6 @@ class TrainManager:
             return is_best
 
         def is_better(self, score, heap_queue):
-            if len(heap_queue) == 0:
-                return True
             if self.minimize_metric:
                 is_better = score < heapq.nsmallest(1, heap_queue)[0][0]
             else:

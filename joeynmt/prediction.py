@@ -18,20 +18,24 @@ from joeynmt.model import build_model, Model, _DataParallel
 from joeynmt.search import run_batch
 from joeynmt.batch import Batch
 from joeynmt.data import load_data, make_data_iter, TranslationDataset, \
-    read_data_file, _tokenize
+    _tokenize
 from joeynmt.vocabulary import Vocabulary
 
 logger = logging.getLogger(__name__)
 
 
-def validate_on_data(model: Model, data: Dataset,
+def validate_on_data(model: Model,
+                     data: Dataset,
                      batch_size: int,
-                     device: torch.device, max_output_length: int,
-                     level: str, eval_metric: Optional[str],
+                     device: torch.device,
                      n_gpu: int,
+                     max_output_length: int,
+                     level: str,
+                     eval_metric: Optional[str],
                      batch_class: Batch = Batch,
                      compute_loss: bool = False,
-                     beam_size: int = 1, beam_alpha: int = -1,
+                     beam_size: int = 1,
+                     beam_alpha: int = -1,
                      batch_type: str = "sentence",
                      postprocess: bool = True,
                      bpe_type: str = "subword-nmt",
@@ -47,12 +51,12 @@ def validate_on_data(model: Model, data: Dataset,
     :param model: model module
     :param data: dataset for validation
     :param batch_size: validation batch size
-    :param batch_class: class type of batch
     :param device: cpu or gpu
+    :param n_gpu: number of GPUs
     :param max_output_length: maximum length for generated hypotheses
     :param level: segmentation level, one of "char", "bpe", "word"
     :param eval_metric: evaluation metric, e.g. "bleu"
-    :param n_gpu: number of GPUs
+    :param batch_class: class type of batch
     :param compute_loss: whether to computes a scalar loss
         for given inputs and targets
     :param beam_size: beam size for validation.
@@ -70,7 +74,6 @@ def validate_on_data(model: Model, data: Dataset,
         - valid_loss: validation loss,
         - valid_ppl:, validation perplexity,
         - valid_sources: validation sources,
-        - valid_sources_raw: raw validation sources (before post-processing),
         - valid_references: validation references,
         - valid_hypotheses: validation_hypotheses,
         - decoded_valid: raw validation hypotheses (before post-processing),
@@ -87,114 +90,108 @@ def validate_on_data(model: Model, data: Dataset,
             "Consider decreasing it or switching to"
             " 'eval_batch_type: token'.")
 
-    # caution: batch_size divided by beam_size, because a batch will be expanded
-    # to batch_size*beam_size, and it could cause an out-of-memory error.
-    valid_iter = make_data_iter(dataset=data, batch_size=batch_size//beam_size,
+    valid_iter = make_data_iter(dataset=data, batch_size=batch_size,
                                 batch_type=batch_type, batch_class=batch_class,
                                 shuffle=False, pad_index=model.pad_index,
                                 device=device)
-    valid_sources_raw = data.src
+    #valid_sources_raw = data.src
 
     # disable dropout
     model.eval()
 
-    # don't track gradients during validation
-    with torch.no_grad():
-        all_outputs = []
-        valid_attention_scores = []
-        total_loss = 0
-        total_ntokens = 0
-        total_nseqs = 0
-        for batch in valid_iter:
-            # sort batch now by src length and keep track of order
-            reverse_indexes = batch.sort_by_src_length()
-            sort_reverse_index = [[] for _ in range(len(reverse_indexes))]
-            for i, ix in enumerate(reverse_indexes):
-                for n in range(0, n_best):
-                    sort_reverse_index[i].append(ix + n)
 
-            assert len(sort_reverse_index) == batch.nseqs
+    all_outputs = []
+    valid_attention_scores = []
+    total_loss = 0
+    total_ntokens = 0
+    total_nseqs = 0
+    for batch in valid_iter:
+        # sort batch now by src length and keep track of order
+        sort_reverse_index = batch.sort_by_src_length()
 
-            # run as during training to get validation loss (e.g. xent)
-            if compute_loss and batch.trg is not None:
+        if n_best > 1:
+            sort_reverse_index = [ix*n_best + n
+                                  for i, ix in enumerate(sort_reverse_index)
+                                  for n in range(n_best)]
+            assert len(sort_reverse_index) == batch.nseqs * n_best
+
+        # run as during training to get validation loss (e.g. xent)
+        if compute_loss and batch.trg is not None:
+            # don't track gradients
+            with torch.no_grad():
                 batch_loss, _, _, _ = model(return_type="loss", **vars(batch))
-                if n_gpu > 1:
-                    batch_loss = batch_loss.mean() # average on multi-gpu
-                total_loss += batch_loss
-                total_ntokens += batch.ntokens
-                total_nseqs += batch.nseqs
+            if n_gpu > 1:
+                batch_loss = batch_loss.mean() # average on multi-gpu
+            total_loss += batch_loss
+            total_ntokens += batch.ntokens
+            total_nseqs += batch.nseqs
 
-            # run as during inference to produce translations
-            output, attention_scores = run_batch(
-                model=model, batch=batch, beam_size=beam_size,
-                beam_alpha=beam_alpha, max_output_length=max_output_length,
-                n_best=n_best)
+        # run as during inference to produce translations
+        output, attention_scores = run_batch(model=model,
+            batch=batch, beam_size=beam_size, beam_alpha=beam_alpha,
+            max_output_length=max_output_length, n_best=n_best)
 
-            # sort outputs back to original order
-            for reverse_index in sort_reverse_index:
-                all_outputs.append(output[reverse_index])
-                if attention_scores is not None:
-                    valid_attention_scores.append(
-                        attention_scores[reverse_index])
+        # sort outputs back to original order
+        all_outputs.extend(output[sort_reverse_index])
+        valid_attention_scores.extend(attention_scores[sort_reverse_index]
+                                      if attention_scores is not None else [])
 
-        assert len(all_outputs) == len(data)
+    assert len(all_outputs) == len(data) * n_best
 
-        if compute_loss and total_ntokens > 0:
-            # total validation loss
-            valid_loss = total_loss / total_nseqs
-            # exponent of token-level negative log prob
-            valid_ppl = torch.exp(total_loss / total_ntokens)
-        else:
-            valid_loss = -1
-            valid_ppl = -1
+    if compute_loss and total_ntokens > 0:
+        # total validation loss
+        valid_loss = total_loss / total_nseqs
+        # exponent of token-level negative log prob
+        valid_ppl = torch.exp(total_loss / total_ntokens)
+    else:
+        valid_loss = -1
+        valid_ppl = -1
 
-        # decode back to symbols
-        decoded_valid = model.trg_vocab.arrays_to_sentences(
-            arrays=[output for output_group in all_outputs
-                    for output in output_group],
-            cut_at_eos=True
-        )
+    # decode back to symbols
+    decoded_valid = model.trg_vocab.arrays_to_sentences(arrays=all_outputs,
+                                                        cut_at_eos=True)
 
-        # evaluate with metric on full dataset
-        join_char = " " if level in ["word", "bpe"] else ""
-        valid_sources = [join_char.join(s) for s in data.src]
-        valid_references = [join_char.join(t) for t in data.trg]
-        valid_hypotheses = [join_char.join(t) for t in decoded_valid]
+    # evaluate with metric on full dataset
+    join_char = " " if level in ["word", "bpe"] else ""
+    valid_sources = [join_char.join(s) for s in data.src]
+    valid_references = [join_char.join(t) for t in data.trg] \
+        if data.trg is not None else []
+    valid_hypotheses = [join_char.join(t) for t in decoded_valid]
 
-        # post-process
-        if level == "bpe" and postprocess:
-            valid_sources = [bpe_postprocess(s, bpe_type=bpe_type)
-                             for s in valid_sources]
-            valid_references = [bpe_postprocess(v, bpe_type=bpe_type)
-                                for v in valid_references]
-            valid_hypotheses = [bpe_postprocess(v, bpe_type=bpe_type)
-                                for v in valid_hypotheses]
+    # post-process
+    if level == "bpe" and postprocess:
+        valid_sources = [bpe_postprocess(s, bpe_type=bpe_type)
+                         for s in valid_sources]
+        valid_references = [bpe_postprocess(v, bpe_type=bpe_type)
+                            for v in valid_references]
+        valid_hypotheses = [bpe_postprocess(v, bpe_type=bpe_type)
+                            for v in valid_hypotheses]
 
-        # if references are given, evaluate against them
-        if valid_references:
-            assert len(valid_hypotheses) == len(valid_references)
+    # if references are given, evaluate against them
+    if valid_references:
+        assert len(valid_hypotheses) == len(valid_references)
 
-            current_valid_score = 0
-            if eval_metric.lower() == 'bleu':
-                # this version does not use any tokenization
-                current_valid_score = bleu(
-                    valid_hypotheses, valid_references,
-                    tokenize=sacrebleu["tokenize"])
-            elif eval_metric.lower() == 'chrf':
-                current_valid_score = chrf(valid_hypotheses, valid_references,
-                    remove_whitespace=sacrebleu["remove_whitespace"])
-            elif eval_metric.lower() == 'token_accuracy':
-                current_valid_score = token_accuracy(   # supply List[List[str]]
-                    list(decoded_valid), list(data.trg))
-            elif eval_metric.lower() == 'sequence_accuracy':
-                current_valid_score = sequence_accuracy(
-                    valid_hypotheses, valid_references)
-        else:
-            current_valid_score = -1
+        current_valid_score = 0
+        if eval_metric.lower() == 'bleu':
+            # this version does not use any tokenization
+            current_valid_score = bleu(
+                valid_hypotheses, valid_references,
+                tokenize=sacrebleu["tokenize"])
+        elif eval_metric.lower() == 'chrf':
+            current_valid_score = chrf(valid_hypotheses, valid_references,
+                remove_whitespace=sacrebleu["remove_whitespace"])
+        elif eval_metric.lower() == 'token_accuracy':
+            current_valid_score = token_accuracy(   # supply List[List[str]]
+                list(decoded_valid), list(data.trg))
+        elif eval_metric.lower() == 'sequence_accuracy':
+            current_valid_score = sequence_accuracy(
+                valid_hypotheses, valid_references)
+    else:
+        current_valid_score = -1
 
     return current_valid_score, valid_loss, valid_ppl, valid_sources, \
-        valid_sources_raw, valid_references, valid_hypotheses, \
-        decoded_valid, valid_attention_scores
+           valid_references, valid_hypotheses, decoded_valid, \
+           valid_attention_scores
 
 
 def parse_test_args(cfg, mode="test"):
@@ -255,7 +252,12 @@ def parse_test_args(cfg, mode="test"):
             format(beam_size, beam_alpha)
     tokenizer_info = sacrebleu['tokenize'] if eval_metric == "bleu" else ""
 
-    return batch_size, batch_type, use_cuda, device, n_gpu, level, \
+    # caution: batch_size divided by beam_size, because a batch will be expanded
+    # to batch.nseqs * beam_size, and it could cause an out-of-memory error.
+    if batch_size > beam_size:
+        batch_size //= beam_size
+
+    return batch_size, batch_type, device, n_gpu, level, \
            eval_metric, max_output_length, beam_size, beam_alpha, \
            postprocess, bpe_type, sacrebleu, decoding_description, \
            tokenizer_info
@@ -276,7 +278,7 @@ def test(cfg_file,
     :param datasets: datasets to predict
     :param save_attention: whether to save the computed attention weights
     """
-    # pylint: disable=logging-too-many-args
+    # pylint: disable=logging-too-many-args,too-many-branches
     cfg = load_config(Path(cfg_file))
     model_dir = Path(cfg["training"]["model_dir"])
 
@@ -295,7 +297,7 @@ def test(cfg_file,
         trg_vocab = datasets["trg_vocab"]
 
     # parse test args
-    batch_size, batch_type, use_cuda, device, n_gpu, level, eval_metric, \
+    batch_size, batch_type, device, n_gpu, level, eval_metric, \
         max_output_length, beam_size, beam_alpha, postprocess, \
         bpe_type, sacrebleu, decoding_description, tokenizer_info \
         = parse_test_args(cfg, mode="test")
@@ -316,7 +318,7 @@ def test(cfg_file,
     model_checkpoint = load_checkpoint(Path(ckpt), device=device)
     model.load_state_dict(model_checkpoint["model_state"])
 
-    if use_cuda:
+    if device.type == "cuda":
         model.to(device)
 
     # multi-gpu eval
@@ -331,8 +333,8 @@ def test(cfg_file,
         logger.info("Decoding on %s set (%s)...", data_set_name, dataset_file)
 
         #pylint: disable=unused-variable
-        score, loss, ppl, sources, sources_raw, references, hypotheses, \
-        hypotheses_raw, attention_scores = validate_on_data(
+        score, loss, ppl, sources, references, hypotheses, hypotheses_raw, \
+        attention_scores = validate_on_data(
             model, data=data_set, batch_size=batch_size,
             batch_class=Batch, batch_type=batch_type, level=level,
             max_output_length=max_output_length, eval_metric=eval_metric,
@@ -375,7 +377,7 @@ def test(cfg_file,
 
 
 def translate(cfg_file: str,
-              ckpt: str,
+              ckpt: str = None,
               output_path: str = None,
               n_best: int = 1) -> None:
     """
@@ -391,11 +393,13 @@ def translate(cfg_file: str,
     :param output_path: path to output file
     :param n_best: amount of candidates to display
     """
+    # pylint: disable=too-many-branches
+
     def _translate_data(test_data):
         """ Translates given dataset, using parameters from outer scope. """
         # pylint: disable=unused-variable
-        score, loss, ppl, sources, sources_raw, references, hypotheses, \
-        hypotheses_raw, attention_scores = validate_on_data(
+        score, loss, ppl, sources, references, hypotheses, hypotheses_raw, \
+        attention_scores = validate_on_data(
             model, data=test_data, batch_size=batch_size,
             batch_class=Batch, batch_type=batch_type, level=level,
             max_output_length=max_output_length, eval_metric="",
@@ -410,10 +414,9 @@ def translate(cfg_file: str,
     _ = make_logger(model_dir, mode="translate")
     # version string returned
 
-    # when checkpoint is not specified, take oldest from model dir
+    # when checkpoint is not specified, take latest (best) from model dir
     if ckpt is None:
-        if ckpt is None:
-            ckpt = cfg["training"].get("load_model", None)
+        ckpt = cfg["training"].get("load_model", None)
         if ckpt is None:
             if (model_dir / "best.ckpt").is_file():
                 ckpt = model_dir / "best.ckpt"
@@ -427,13 +430,11 @@ def translate(cfg_file: str,
     trg_vocab = Vocabulary(file=Path(trg_vocab_file))
 
     data_cfg = cfg["data"]
-    src_lang = data_cfg["src"]
     level = data_cfg["level"]
     lowercase = data_cfg["lowercase"]
-    test_path = data_cfg.get("test", None)
 
     # parse test args
-    batch_size, batch_type, use_cuda, device, n_gpu, level, _, \
+    batch_size, batch_type, device, n_gpu, level, _, \
         max_output_length, beam_size, beam_alpha, postprocess, \
         bpe_type, sacrebleu, _, _ = parse_test_args(cfg, mode="translate")
 
@@ -444,36 +445,35 @@ def translate(cfg_file: str,
     model_checkpoint = load_checkpoint(Path(ckpt), device=device)
     model.load_state_dict(model_checkpoint["model_state"])
 
-    if use_cuda:
+    if device.type == "cuda":
         model.to(device)
 
     if not sys.stdin.isatty():
-        # input file given
-        assert test_path is not None, "Test file is not given."
-        test_src, _ = read_data_file(path=Path(test_path),
-                                     exts=(src_lang, None),
-                                     level=level,
-                                     lowercase=lowercase)
-        test_data = TranslationDataset(test_src, None)
+        # input stream given
+        test_src = [_tokenize(line.rstrip(), level, lowercase)
+                    for line in sys.stdin.readlines()]
+        test_data = TranslationDataset(test_src, None,
+                                       src_padding=src_vocab.sentences_to_ids,
+                                       trg_padding=trg_vocab.sentences_to_ids)
         all_hypotheses = _translate_data(test_data)
 
         if output_path is not None:
             # write to outputfile if given
-            output_path_set = Path(output_path)
+            output_path_set = Path(output_path).expanduser()
 
             def write_to_file(output_path_set, hypotheses):
-                with output_path_set.open(mode="w", encoding="utf-8") \
-                        as out_file:
+                with output_path_set.open("w", encoding="utf-8") as out_file:
                     for hyp in hypotheses:
                         out_file.write(f"{hyp}\n")
                 logger.info("Translations saved to: %s.", output_path_set)
 
             if n_best > 1:
+                assert len(all_hypotheses) == len(test_data) * n_best
                 for n in range(n_best):
                     file_name = output_path_set.stem
                     file_extension = output_path_set.suffix
                     write_to_file(
-                        Path(output_path_set.parent / file_name / f"-{n}") \
+                        Path(output_path_set.parent / f"{file_name}-{n}") \
                             .with_suffix(file_extension),
                         [all_hypotheses[i]
                          for i in range(n, len(all_hypotheses), n_best)]
@@ -499,7 +499,9 @@ def translate(cfg_file: str,
 
                 # every line has to be made into dataset
                 test_src = [_tokenize(src_input, level, lowercase)]
-                test_data = TranslationDataset(test_src, None)
+                test_data = TranslationDataset(test_src, None,
+                                src_padding=src_vocab.sentences_to_ids,
+                                trg_padding=trg_vocab.sentences_to_ids)
                 hypotheses = _translate_data(test_data)
 
                 print("JoeyNMT: Hypotheses ranked by score")

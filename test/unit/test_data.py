@@ -28,20 +28,18 @@ class TestData(unittest.TestCase):
             load_data(current_cfg)
 
         # make batches by number of sentences
-        train_iter = iter(make_data_iter(
-            train_data, src_vocab, trg_vocab, batch_size=10,
-            batch_type="sentence", batch_class=Batch,
-            shuffle=True, seed=self.seed, num_workers=0))
+        train_iter = iter(make_data_iter(train_data, batch_size=10,
+            batch_type="sentence", batch_class=Batch, shuffle=True,
+            seed=self.seed, pad_index=trg_vocab.pad_index, num_workers=0))
         batch = next(train_iter)
 
         self.assertEqual(batch.src.shape[0], 10)
         self.assertEqual(batch.trg.shape[0], 10)
 
         # make batches by number of tokens
-        train_iter = iter(make_data_iter(
-            train_data, src_vocab, trg_vocab, batch_size=100,
-            batch_type="token", batch_class=Batch,
-            shuffle=True, seed=self.seed, num_workers=0))
+        train_iter = iter(make_data_iter(train_data, batch_size=100,
+            batch_type="token", batch_class=Batch, shuffle=True,
+            seed=self.seed, pad_index=trg_vocab.pad_index, num_workers=0))
         _ = next(train_iter)  # skip a batch
         _ = next(train_iter)  # skip another batch
         batch = next(train_iter)

@@ -2,6 +2,7 @@
 """
 Module to represents whole models
 """
+from pathlib import Path
 from typing import Callable
 import logging
 import numpy as np
@@ -293,16 +294,14 @@ def build_model(cfg: dict = None,
     initialize_model(model, cfg, src_vocab.pad_index, trg_vocab.pad_index)
 
     # initialize embeddings from file
-    pretrained_enc_embed_path = cfg["encoder"]["embeddings"].get(
-        "load_pretrained", None)
-    pretrained_dec_embed_path = cfg["decoder"]["embeddings"].get(
-        "load_pretrained", None)
-    if pretrained_enc_embed_path:
+    enc_embed_path = cfg["encoder"]["embeddings"].get("load_pretrained", None)
+    dec_embed_path = cfg["decoder"]["embeddings"].get("load_pretrained", None)
+    if enc_embed_path:
         logger.info("Loading pretraind src embeddings...")
-        model.src_embed.load_from_file(pretrained_enc_embed_path, src_vocab)
-    if pretrained_dec_embed_path and not cfg.get("tied_embeddings", False):
+        model.src_embed.load_from_file(Path(enc_embed_path), src_vocab)
+    if dec_embed_path and not cfg.get("tied_embeddings", False):
         logger.info("Loading pretraind trg embeddings...")
-        model.trg_embed.load_from_file(pretrained_dec_embed_path, trg_vocab)
+        model.trg_embed.load_from_file(Path(dec_embed_path), trg_vocab)
 
     logger.info("Enc-dec model built.")
     return model

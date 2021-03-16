@@ -2,23 +2,28 @@
 """
 Collection of helper functions
 """
+from __future__ import annotations
 import copy
 import shutil
 import random
 import logging
-from typing import Optional, List
+from typing import Optional, List, Any, TYPE_CHECKING
 from pathlib import Path
-import numpy as np
+import functools
+import operator
+import yaml
 import pkg_resources
+import numpy as np
 
 import torch
 from torch import nn, Tensor
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import Dataset
 
-import yaml
-from joeynmt.vocabulary import Vocabulary
 from joeynmt.plotting import plot_heatmap
+
+if TYPE_CHECKING:
+    from joeynmt.vocabulary import Vocabulary # to avoid circular import
 
 
 class ConfigurationError(Exception):
@@ -241,7 +246,8 @@ def store_attention_plots(attentions: np.array,
 
 def get_latest_checkpoint(ckpt_dir: Path) -> Optional[Path]:
     """
-    Returns the latest checkpoint (by time) from the given directory.
+    Returns the latest checkpoint (by creation time, not the steps number!)
+    from the given directory.
     If there is no checkpoint in this directory, returns None
 
     :param ckpt_dir:
@@ -270,7 +276,7 @@ def load_checkpoint(path: Path, device: torch.device) -> dict:
     logger = logging.getLogger(__name__)
     assert path.is_file(), "Checkpoint %s not found" % path
     checkpoint = torch.load(path.as_posix(), map_location=device)
-    logger.info("Load model from %s.", path)
+    logger.info("Load model from %s.", path.resolve())
     return checkpoint
 
 
@@ -355,3 +361,11 @@ def symlink_update(target: Path, link_name: Path) -> Optional[Path]:
         return current_last
     link_name.symlink_to(target)
     return None
+
+
+def flatten(array: List[List[Any]]) -> List[Any]:
+    """
+    flatten a nested list. fast even with very long array.
+    :param array:
+    """
+    return functools.reduce(operator.iconcat, array, [])

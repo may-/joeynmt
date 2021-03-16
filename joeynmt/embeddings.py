@@ -3,7 +3,7 @@
 Embedding module
 """
 
-import io
+from pathlib import Path
 import math
 import logging
 import torch
@@ -63,7 +63,7 @@ class Embeddings(nn.Module):
             self.__class__.__name__, self.embedding_dim, self.vocab_size)
 
     #from fairseq
-    def load_from_file(self, embed_path: str, vocab: Vocabulary):
+    def load_from_file(self, embed_path: Path, vocab: Vocabulary):
         """Load pretrained embedding weights from text file.
 
         - First line is expected to contain vocabulary size and dimension.
@@ -88,14 +88,13 @@ class Embeddings(nn.Module):
         """
         embed_dict = {}
         # parse file
-        with io.open(embed_path, 'r', encoding='utf-8',
-                     errors='ignore') as f_embed:
+        with embed_path.open('r', encoding='utf-8', errors='ignore') as f_embed:
             vocab_size, d = map(int, f_embed.readline().split())
             assert self.embedding_dim == d, \
                 "Embedding dimension doesn't match."
             for line in f_embed.readlines():
                 tokens = line.rstrip().split(' ')
-                if tokens[0] in vocab._stoi.keys():
+                if tokens[0] in vocab.specials or not vocab.is_unk(tokens[0]):
                     embed_dict[tokens[0]] = torch.FloatTensor(
                         [float(t) for t in tokens[1:]])
 
@@ -106,7 +105,7 @@ class Embeddings(nn.Module):
 
         # assign
         for idx in range(len(vocab)):
-            token = vocab._itos[idx]
+            token = vocab.lookup(idx)
             if token in embed_dict:
                 assert self.embedding_dim == len(embed_dict[token])
                 self.lut.weight.data[idx] = embed_dict[token]

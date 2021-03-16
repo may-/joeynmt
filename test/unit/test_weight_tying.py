@@ -48,7 +48,7 @@ class TestWeightTying(TensorTestCase):
         model = build_model(cfg["model"],
                             src_vocab=src_vocab, trg_vocab=trg_vocab)
 
-        self.assertEqual(src_vocab.itos, trg_vocab.itos)
+        self.assertEqual(src_vocab, trg_vocab)
         self.assertEqual(model.src_embed, model.trg_embed)
         self.assertTensorEqual(model.src_embed.lut.weight,
                                model.trg_embed.lut.weight)

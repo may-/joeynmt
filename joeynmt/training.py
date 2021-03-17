@@ -501,6 +501,17 @@ class TrainManager:
                         valid_duration = self._validate(valid_data, epoch_no)
                         total_valid_duration += valid_duration
 
+                    # check current_lr
+                    # ignores other param groups for now
+                    #for param_group in self.optimizer.param_groups:
+                    #    current_lr = param_group['lr']
+                    current_lr = self.optimizer.param_groups[0]['lr']
+                    if current_lr < self.learning_rate_min:
+                        self.stats.is_min_lr = True
+
+                    self.tb_writer.add_scalar("train/learning_rate", current_lr,
+                                              self.stats.steps)
+
                 if self.stats.is_min_lr or self.stats.is_max_update:
                     break
 
@@ -572,9 +583,8 @@ class TrainManager:
     def _validate(self, valid_data, epoch_no):
         valid_start_time = time.time()
 
-        valid_score, valid_loss, valid_ppl, valid_sources, \
-        valid_sources_raw, valid_references, valid_hypotheses, \
-        valid_hypotheses_raw, valid_attention_scores = \
+        valid_score, valid_loss, valid_ppl, valid_sources, valid_references, \
+        valid_hypotheses, valid_hypotheses_raw, valid_attention_scores = \
             validate_on_data(
                 batch_size=self.eval_batch_size,
                 batch_class=self.batch_class,
@@ -629,13 +639,13 @@ class TrainManager:
         self._add_report(valid_score=valid_score,
                          valid_loss=valid_loss,
                          valid_ppl=valid_ppl,
-                         eval_metric=self.eval_metric,
                          new_best=new_best)
 
-        self._log_examples(sources_raw=valid_sources_raw,
+        self._log_examples(sources_raw=valid_data.src,
                            sources=valid_sources,
                            hypotheses_raw=valid_hypotheses_raw,
                            hypotheses=valid_hypotheses,
+                           references_raw=valid_data.trg,
                            references=valid_references)
 
         valid_duration = time.time() - valid_start_time
@@ -666,7 +676,6 @@ class TrainManager:
                     valid_score: float,
                     valid_ppl: float,
                     valid_loss: float,
-                    eval_metric: str,
                     new_best: bool = False) -> None:
         """
         Append a one-line report to validation logging file.
@@ -674,24 +683,16 @@ class TrainManager:
         :param valid_score: validation evaluation score [eval_metric]
         :param valid_ppl: validation perplexity
         :param valid_loss: validation loss (sum over whole validation set)
-        :param eval_metric: evaluation metric, e.g. "bleu"
         :param new_best: whether this is a new best model
         """
-        #current_lr = -1
-        # ignores other param groups for now
-        #for param_group in self.optimizer.param_groups:
-        #    current_lr = param_group['lr']
         current_lr = self.optimizer.param_groups[0]['lr']
-
-        if current_lr < self.learning_rate_min:
-            self.stats.is_min_lr = True
 
         with self.valid_report_file.open('a') as opened_file:
             opened_file.write(
                 "Steps: {}\tLoss: {:.5f}\tPPL: {:.5f}\t{}: {:.5f}\t"
-                "LR: {:.8f}\t{}\n".format(self.stats.steps, valid_loss,
-                                          valid_ppl, eval_metric, valid_score,
-                                          current_lr, "*" if new_best else ""))
+                "LR: {:.8f}\t{}\n".format(
+                    self.stats.steps, valid_loss, valid_ppl, self.eval_metric,
+                    valid_score, current_lr, "*" if new_best else ""))
 
     def _log_examples(self,
                       sources: List[str],

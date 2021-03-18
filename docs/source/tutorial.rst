@@ -118,7 +118,7 @@ Here we're using the "plateau" scheduler that reduces the initial learning rate 
 Validations (with greedy decoding) are performed every ``validation_freq`` batches and every ``logging_freq`` batches the training batch loss will be logged.
 
 Checkpoints for the model parameters are saved whenever a new high score in ``early_stopping_metric``, here the ``eval_metric`` BLEU, has been reached.
-In order to not waste much memory on old checkpoints, we're only keeping the ``keep_last_ckpts`` best checkpoints. We can also always keep the latest checkpoint by setting ``save_latest_ckpt`` to ``True``. This will keep the latest checkpoint and delete the previous checkpoint as necessary.
+In order to not waste much memory on old checkpoints, we're only keeping the ``num_ckpts`` checkpoints (-1 to save all the checkpoints). We can also chose whether to keep the best or last checkpoints by setting ``keep_ckpts``.
 
 At the beginning of each epoch the training data is shuffled if we set ``shuffle`` to True (there is actually no good reason for not doing so).
 
@@ -150,7 +150,8 @@ With `use_cuda` we can decide whether to train the model on GPU (True) or CPU (F
         use_cuda: False
         max_output_length: 30
         print_valid_sents: [0, 3, 6]
-        keep_last_ckpts: 2
+        num_ckpts: 2
+        keep_ckpts: "best"
 
 
 3. Testing Section

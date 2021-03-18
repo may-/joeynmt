@@ -267,11 +267,11 @@ class TrainManager:
         symlink_target = Path(f"{self.stats.steps}.ckpt")
         # last symlink
         last_path = self.model_dir / "latest.ckpt"
-        symlink_update(symlink_target, last_path)
+        prev_path = symlink_update(symlink_target, last_path)
         # best symlink
         best_path = self.model_dir / "best.ckpt"
         if new_best:
-            symlink_update(symlink_target, best_path)
+            prev_path = symlink_update(symlink_target, best_path)
             assert best_path.resolve().stem == str(self.stats.best_ckpt_iter)
 
         # push to and pop from the heap queue
@@ -297,6 +297,11 @@ class TrainManager:
                 delete_ckpt(to_delete[1])         # don't delete the best one
 
             assert len(self.ckpt_queue) <= self.num_ckpts
+
+            # remove old symlink target if not in queue after push/pop
+            if prev_path is not None and \
+                    prev_path.stem not in [c[1].stem for c in self.ckpt_queue]:
+                delete_ckpt(prev_path)
 
     def init_from_checkpoint(self,
                              path: Path,

@@ -11,8 +11,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from joeynmt.helpers import bpe_postprocess, load_config, make_logger,\
-    get_latest_checkpoint, load_checkpoint, store_attention_plots
+from joeynmt.helpers import load_config, make_logger, get_latest_checkpoint, \
+    bpe_postprocess, load_checkpoint, store_attention_plots, write_list_to_file
 from joeynmt.metrics import bleu, chrf, token_accuracy, sequence_accuracy
 from joeynmt.model import build_model, Model, _DataParallel
 from joeynmt.search import run_batch
@@ -369,11 +369,9 @@ def test(cfg_file,
                                "Set beam_size to 1 for greedy decoding.")
 
         if output_path is not None:
-            output_path_set = Path(f"{output_path}.{data_set_name}.hyp")
-            with output_path_set.open(mode="w", encoding="utf-8") as out_file:
-                for hyp in hypotheses:
-                    out_file.write(f"{hyp}\n")
-            logger.info("Translations saved to: %s", output_path_set)
+            output_path_set = Path(f"{output_path}.{data_set_name}")
+            write_list_to_file(output_path_set, hypotheses)
+            logger.info("Translations saved to: %s.", output_path_set)
 
 
 def translate(cfg_file: str,
@@ -456,30 +454,25 @@ def translate(cfg_file: str,
                                        src_padding=src_vocab.sentences_to_ids,
                                        trg_padding=trg_vocab.sentences_to_ids)
         all_hypotheses = _translate_data(test_data)
+        assert len(all_hypotheses) == len(test_data) * n_best
 
         if output_path is not None:
             # write to outputfile if given
             output_path_set = Path(output_path).expanduser()
 
-            def write_to_file(output_path_set, hypotheses):
-                with output_path_set.open("w", encoding="utf-8") as out_file:
-                    for hyp in hypotheses:
-                        out_file.write(f"{hyp}\n")
-                logger.info("Translations saved to: %s.", output_path_set)
-
             if n_best > 1:
-                assert len(all_hypotheses) == len(test_data) * n_best
                 for n in range(n_best):
                     file_name = output_path_set.stem
                     file_extension = output_path_set.suffix
-                    write_to_file(
+                    write_list_to_file(
                         Path(output_path_set.parent / f"{file_name}-{n}") \
                             .with_suffix(file_extension),
                         [all_hypotheses[i]
                          for i in range(n, len(all_hypotheses), n_best)]
                     )
             else:
-                write_to_file(output_path_set, all_hypotheses)
+                write_list_to_file(output_path_set, all_hypotheses)
+            logger.info("Translations saved to: %s.", output_path_set)
 
         else:
             # print to stdout

@@ -23,7 +23,7 @@ from joeynmt.model import build_model
 from joeynmt.batch import Batch
 from joeynmt.helpers import load_config, log_cfg, store_attention_plots, \
     load_checkpoint, make_model_dir, make_logger, set_seed, symlink_update, \
-    delete_ckpt, ConfigurationError
+    delete_ckpt, write_list_to_file, ConfigurationError
 from joeynmt.model import Model, _DataParallel
 from joeynmt.prediction import validate_on_data, test
 from joeynmt.loss import XentLoss
@@ -661,7 +661,8 @@ class TrainManager:
             valid_score, valid_loss, valid_ppl, valid_duration)
 
         # store validation set outputs
-        self._store_outputs(valid_hypotheses)
+        current_valid_output_path = self.model_dir / f"{self.stats.steps}.hyps"
+        write_list_to_file(current_valid_output_path, valid_hypotheses)
 
         # store attention plots for selected valid sentences
         if valid_attention_scores:
@@ -734,17 +735,6 @@ class TrainManager:
             logger.info("\tReference:  %s", references[p])
             logger.info("\tHypothesis: %s", hypotheses[p])
 
-    def _store_outputs(self, hypotheses: List[str]) -> None:
-        """
-        Write current validation outputs to file in `self.model_dir.`
-
-        :param hypotheses: list of strings
-        """
-        current_valid_output_file = self.model_dir / f"{self.stats.steps}.hyps"
-        with current_valid_output_file.open('w') as opened_file:
-            for hyp in hypotheses:
-                opened_file.write(f"{hyp}\n")
-
     class TrainStatistics:
         def __init__(self,
                      steps: int = 0,
@@ -779,6 +769,7 @@ class TrainManager:
             return is_best
 
         def is_better(self, score, heap_queue):
+            assert len(heap_queue) > 0
             if self.minimize_metric:
                 is_better = score < heapq.nsmallest(1, heap_queue)[0][0]
             else:

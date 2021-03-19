@@ -179,6 +179,18 @@ def load_config(path: Path = Path("configs/default.yaml")) -> dict:
     return cfg
 
 
+def write_list_to_file(output_path: Path, array: List[str]) -> None:
+    """
+    Write list of str to file in `output_path`.
+
+    :param output_path: output file path
+    :param array: list of strings
+    """
+    with output_path.open('w') as opened_file:
+        for entry in array:
+            opened_file.write(f"{entry}\n")
+
+
 def bpe_postprocess(string, bpe_type="subword-nmt") -> str:
     """
     Post-processor for BPE output. Recombines BPE-split tokens.
@@ -365,7 +377,10 @@ def symlink_update(target: Path, link_name: Path) -> Optional[Path]:
 
 def flatten(array: List[List[Any]]) -> List[Any]:
     """
-    flatten a nested list. fast even with very long array.
-    :param array:
+    flatten a nested 2D list. faster even with a very long array than
+    [item for subarray in array for item in subarray] or newarray.extend().
+
+    :param array: a nested list
+    :return: flattened list
     """
     return functools.reduce(operator.iconcat, array, [])

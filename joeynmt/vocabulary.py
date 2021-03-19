@@ -11,7 +11,7 @@ import numpy as np
 
 from joeynmt.constants import UNK_TOKEN, EOS_TOKEN, BOS_TOKEN, PAD_TOKEN, \
     UNK_ID, PAD_ID, BOS_ID, EOS_ID
-from joeynmt.helpers import flatten
+from joeynmt.helpers import flatten, write_list_to_file
 
 
 class Vocabulary:
@@ -82,9 +82,7 @@ class Vocabulary:
 
         :param file: path to file where the vocabulary is written
         """
-        with file.open("w") as open_file:
-            for t in self._itos:
-                open_file.write(f"{t}\n")
+        write_list_to_file(file, self._itos)
 
     def add_tokens(self, tokens: List[str]) -> None:
         """

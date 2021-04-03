@@ -1,11 +1,13 @@
 # coding: utf-8
 import matplotlib
-matplotlib.use('Agg')
 
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_pdf import PdfPages
+matplotlib.use('Agg')   # isort:skip
 
 import argparse
+from pathlib import Path
+
+from matplotlib.backends.backend_pdf import PdfPages
+import matplotlib.pyplot as plt
 import numpy as np
 
 
@@ -17,17 +19,16 @@ def read_vfiles(vfiles):
     """
     models = {}
     for vfile in vfiles:
-        model_name = vfile.split("/")[-2] if "//" not in vfile \
-            else vfile.split("/")[-3]
-        with open(vfile, "r") as validf:
+        model_name = vfile.parent.split("/")[-1]
+        with vfile.open("r") as validf:
             steps = {}
             for line in validf:
                 entries = line.strip().split()
                 key = int(entries[1])
                 steps[key] = {}
-                for i in range(2, len(entries)-1, 2):
+                for i in range(2, len(entries) - 1, 2):
                     name = entries[i].strip(":")
-                    value = float(entries[i+1])
+                    value = float(entries[i + 1])
                     steps[key][name] = value
         models[model_name] = steps
     return models
@@ -44,7 +45,7 @@ def plot_models(models, plot_values, output_path):
     # models is a dict: name -> ckpt values
     f, axes = plt.subplots(len(plot_values), len(models),
                            sharex='col', sharey='row',
-                           figsize=(3*len(models), 3*len(plot_values)))
+                           figsize=(3 * len(models), 3 * len(plot_values)))
     axes = np.array(axes).reshape((len(plot_values), len(models)))
 
     for col, model_name in enumerate(models):
@@ -65,16 +66,17 @@ def plot_models(models, plot_values, output_path):
             axes[row][0].set_ylabel(plot_value)
             axes[0][col].set_title(model_name)
     plt.tight_layout()
-    if output_path.endswith(".pdf"):
+    if output_path.suffix == ".pdf":
         pp = PdfPages(output_path)
         pp.savefig(f)
         pp.close()
     else:
-        if not output_path.endswith(".png"):
-            output_path += ".png"
+        if not output_path.suffix == ".png":
+            output_path.with_suffix(".png")
         plt.savefig(output_path)
 
     plt.close()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("JoeyNMT Validation plotting.")
@@ -86,8 +88,8 @@ if __name__ == "__main__":
                         help="Plot will be stored in this location.")
     args = parser.parse_args()
 
-    vfiles = [m+"/validations.txt" for m in args.model_dirs]
+    vfiles = [Path(m) / "validations.txt" for m in args.model_dirs]
 
     models = read_vfiles(vfiles)
 
-    plot_models(models, args.plot_values, args.output_path)
+    plot_models(models, args.plot_values, Path(args.output_path))

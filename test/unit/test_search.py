@@ -1,19 +1,18 @@
-import torch
+from test.unit.test_helpers import TensorTestCase
+
 import numpy as np
+import torch
 
-from joeynmt.search import greedy, recurrent_greedy, transformer_greedy
-from joeynmt.search import beam_search
 from joeynmt.decoders import RecurrentDecoder, TransformerDecoder
-from joeynmt.encoders import RecurrentEncoder
 from joeynmt.embeddings import Embeddings
+from joeynmt.encoders import RecurrentEncoder
 from joeynmt.model import Model
+from joeynmt.search import beam_search, recurrent_greedy, transformer_greedy
 from joeynmt.vocabulary import Vocabulary
-
-from .test_helpers import TensorTestCase
-
 
 # TODO for transformer and rnn, make sure both return the same result for
 # beam_size<2 and greedy decoding
+
 
 class TestSearch(TensorTestCase):
     def setUp(self):
@@ -25,12 +24,12 @@ class TestSearch(TensorTestCase):
         self.dropout = 0.
         self.encoder_hidden_size = 3
         self.vocab = Vocabulary(tokens=['word'])
-        self.vocab_size = len(self.vocab) # = 5
+        self.vocab_size = len(self.vocab)   # = 5
         seed = 42
         torch.manual_seed(seed)
-        #self.bos_index = 2
+        # self.bos_index = 2
         self.pad_index = 1
-        #self.eos_index = 3
+        # self.eos_index = 3
 
 
 class TestSearchTransformer(TestSearch):
@@ -85,8 +84,8 @@ class TestSearchTransformer(TestSearch):
         src_mask, model, encoder_output, encoder_hidden = self._build(
             batch_size=batch_size)
         output, attention_scores = beam_search(
-            size=beam_size, src_mask=src_mask, max_output_length=max_output_length,
-            model=model, alpha=alpha,
+            size=beam_size, src_mask=src_mask,
+            max_output_length=max_output_length, model=model, alpha=alpha,
             encoder_output=encoder_output, encoder_hidden=encoder_hidden)
         # Transformer beam doesn't return attention scores
         self.assertIsNone(attention_scores)
@@ -172,10 +171,10 @@ class TestSearchRecurrent(TestSearch):
         expected_attention_scores = np.array(
             [[[0.22914883, 0.24638498, 0.21247596, 0.3119903],
               [0.22970565, 0.24540883, 0.21261126, 0.31227428],
-              [0.22903332, 0.2459198,  0.2110187,  0.3140282]],
+              [0.22903332, 0.2459198, 0.2110187, 0.3140282]],
              [[0.252522, 0.29074305, 0.257121, 0.19961396],
-              [0.2519883,  0.2895494,  0.25718424, 0.201278],
-              [0.2523954,  0.28959078, 0.25769445, 0.2003194]]])
+              [0.2519883, 0.2895494, 0.25718424, 0.201278],
+              [0.2523954, 0.28959078, 0.25769445, 0.2003194]]])
         np.testing.assert_array_almost_equal(attention_scores,
                                              expected_attention_scores)
         self.assertEqual(attention_scores.shape,
@@ -194,11 +193,11 @@ class TestSearchRecurrent(TestSearch):
 
         beam_size = 1
         alpha = 1.0
-        output, _ = beam_search(
+        beam_output, _ = beam_search(
             size=beam_size, src_mask=src_mask, n_best=1,
             max_output_length=max_output_length, model=model, alpha=alpha,
             encoder_output=encoder_output, encoder_hidden=encoder_hidden)
-        np.testing.assert_array_equal(greedy_output, output)
+        np.testing.assert_array_equal(greedy_output, beam_output)
 
     def test_recurrent_beam7(self):
         batch_size = 2

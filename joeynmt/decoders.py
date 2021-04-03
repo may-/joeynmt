@@ -1,16 +1,16 @@
 # coding: utf-8
-
 """
 Various decoders
 """
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
-import torch.nn as nn
 from torch import Tensor
+import torch.nn as nn
+
 from joeynmt.attention import BahdanauAttention, LuongAttention
 from joeynmt.encoders import Encoder
-from joeynmt.helpers import freeze_params, ConfigurationError, subsequent_mask
+from joeynmt.helpers import ConfigurationError, freeze_params, subsequent_mask
 from joeynmt.transformer_layers import PositionalEncoding, \
     TransformerDecoderLayer
 
@@ -83,7 +83,7 @@ class RecurrentDecoder(Decoder):
         rnn = nn.GRU if rnn_type == "gru" else nn.LSTM
 
         self.input_feeding = input_feeding
-        if self.input_feeding: # Luong-style
+        if self.input_feeding:  # Luong-style
             # combine embedded prev word +attention vector before feeding to rnn
             self.rnn_input_size = emb_size + hidden_size
         else:
@@ -124,7 +124,7 @@ class RecurrentDecoder(Decoder):
                 encoder.output_size, hidden_size, bias=True)
         elif self.init_hidden_option == "last":
             if encoder.output_size != self.hidden_size:
-                if encoder.output_size != 2*self.hidden_size:  # bidirectional
+                if encoder.output_size != 2 * self.hidden_size:  # bidirectional
                     raise ConfigurationError(
                         "For initializing the decoder state with the "
                         "last encoder state, their sizes have to match "
@@ -206,7 +206,7 @@ class RecurrentDecoder(Decoder):
                       prev_att_vector: Tensor,  # context or att vector
                       encoder_output: Tensor,
                       src_mask: Tensor,
-                      hidden: Tensor) -> (Tensor, Tensor, Tensor):
+                      hidden: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
         """
         Perform a single decoder step (1 token).
 
@@ -280,7 +280,7 @@ class RecurrentDecoder(Decoder):
                 hidden: Tensor = None,
                 prev_att_vector: Tensor = None,
                 **kwargs) \
-            -> (Tensor, Tensor, Tensor, Tensor):
+            -> Tuple[Tensor, Tensor, Tensor, Tensor]:
         """
          Unroll the decoder one step at a time for `unroll_steps` steps.
          For every step, the `_forward_step` function is called internally.
@@ -401,7 +401,7 @@ class RecurrentDecoder(Decoder):
         return outputs, hidden, att_probs, att_vectors
 
     def _init_hidden(self, encoder_final: Tensor = None) \
-            -> (Tensor, Optional[Tensor]):
+            -> Tuple[Tensor, Optional[Tensor]]:
         """
         Returns the initial decoder state,
         conditioned on the final encoder state of the last encoder layer.
@@ -433,11 +433,11 @@ class RecurrentDecoder(Decoder):
         if self.init_hidden_option == "bridge" and encoder_final is not None:
             # num_layers x batch_size x hidden_size
             hidden = torch.tanh(
-                    self.bridge_layer(encoder_final)).unsqueeze(0).repeat(
-                    self.num_layers, 1, 1)
+                self.bridge_layer(encoder_final)).unsqueeze(0).repeat(
+                self.num_layers, 1, 1)
         elif self.init_hidden_option == "last" and encoder_final is not None:
             # special case: encoder is bidirectional: use only forward state
-            if encoder_final.shape[1] == 2*self.hidden_size:  # bidirectional
+            if encoder_final.shape[1] == 2 * self.hidden_size:  # bidirectional
                 encoder_final = encoder_final[:, :self.hidden_size]
             hidden = encoder_final.unsqueeze(0).repeat(self.num_layers, 1, 1)
         else:  # initialize with zeros
@@ -489,8 +489,8 @@ class TransformerDecoder(Decoder):
 
         # create num_layers decoder layers and put them in a list
         self.layers = nn.ModuleList([TransformerDecoderLayer(
-                size=hidden_size, ff_size=ff_size, num_heads=num_heads,
-                dropout=dropout) for _ in range(num_layers)])
+            size=hidden_size, ff_size=ff_size, num_heads=num_heads,
+            dropout=dropout) for _ in range(num_layers)])
 
         self.pe = PositionalEncoding(hidden_size)
         self.layer_norm = nn.LayerNorm(hidden_size, eps=1e-6)

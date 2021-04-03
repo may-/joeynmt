@@ -2,14 +2,15 @@
 """
 Collection of builder functions
 """
-from typing import Callable, Optional, Generator
+from functools import partial
 import logging
+from typing import Callable, Generator, Optional
 
 import torch
 from torch import nn
-from torch.optim.lr_scheduler import _LRScheduler, ReduceLROnPlateau, \
-    StepLR, ExponentialLR
 from torch.optim import Optimizer
+from torch.optim.lr_scheduler import ExponentialLR, ReduceLROnPlateau, \
+    StepLR, _LRScheduler
 
 from joeynmt.helpers import ConfigurationError
 
@@ -30,21 +31,17 @@ def build_gradient_clipper(config: dict) -> Optional[Callable]:
     :param config: dictionary with training configurations
     :return: clipping function (in-place) or None if no gradient clipping
     """
-    clip_grad_fun = None
-    if "clip_grad_val" in config.keys():
-        clip_value = config["clip_grad_val"]
-        clip_grad_fun = lambda params: \
-            nn.utils.clip_grad_value_(parameters=params,
-                                      clip_value=clip_value)
-    elif "clip_grad_norm" in config.keys():
-        max_norm = config["clip_grad_norm"]
-        clip_grad_fun = lambda params: \
-            nn.utils.clip_grad_norm_(parameters=params, max_norm=max_norm)
-
     if "clip_grad_val" in config.keys() and "clip_grad_norm" in config.keys():
         raise ConfigurationError(
             "You can only specify either clip_grad_val or clip_grad_norm.")
 
+    clip_grad_fun = None
+    if "clip_grad_val" in config.keys():
+        clip_grad_fun = partial(nn.utils.clip_grad_value_,
+                                clip_value=config["clip_grad_val"])
+    elif "clip_grad_norm" in config.keys():
+        clip_grad_fun = partial(nn.utils.clip_grad_norm_,
+                                max_norm=config["clip_grad_norm"])
     return clip_grad_fun
 
 
@@ -115,6 +112,8 @@ def build_scheduler(config: dict, optimizer: Optimizer, scheduler_mode: str,
         - "noam": see `joeynmt.builders.NoamScheduler`
         - "warmupexponentialdecay": see
           `joeynmt.builders.WarmupExponentialDecayScheduler`
+        - "warmupinversesquareroot": see
+          `joeynmt.builders.WarmupInverseSquareRootScheduler`
 
     If no scheduler is specified, returns (None, None) which will result in
     a constant learning rate.
@@ -128,7 +127,7 @@ def build_scheduler(config: dict, optimizer: Optimizer, scheduler_mode: str,
     :param hidden_size: encoder hidden size (required for NoamScheduler)
     :return:
         - scheduler: scheduler object,
-        - scheduler_step_at: either "validation" or "epoch"
+        - scheduler_step_at: either "validation", "epoch", "step" or "none"
     """
     scheduler, scheduler_step_at = None, None
     if "scheduling" in config.keys() and config["scheduling"]:
@@ -137,7 +136,7 @@ def build_scheduler(config: dict, optimizer: Optimizer, scheduler_mode: str,
         if scheduler_name == "plateau":
             # learning rate scheduler
             kwargs = {"mode": scheduler_mode,
-                      "verbose":False,
+                      "verbose": False,
                       "threshold_mode": 'abs',
                       "factor": config.get("decrease_factor", 0.1),
                       "patience": config.get("patience", 10)}
@@ -155,8 +154,8 @@ def build_scheduler(config: dict, optimizer: Optimizer, scheduler_mode: str,
             # scheduler step is executed after every epoch
             scheduler_step_at = "epoch"
         elif scheduler_name == "noam":
-            scheduler = NoamScheduler(optimizer=optimizer,
-                hidden_size=hidden_size,
+            scheduler = NoamScheduler(
+                optimizer=optimizer, hidden_size=hidden_size,
                 factor=config.get("learning_rate_factor", 1),
                 warmup=config.get("learning_rate_warmup", 4000))
             scheduler_step_at = "step"
@@ -178,12 +177,18 @@ def build_scheduler(config: dict, optimizer: Optimizer, scheduler_mode: str,
                 warmup=config.get("learning_rate_warmup", 10000))
             scheduler_step_at = "step"
 
-    if scheduler_name in [
-        "noam", "warmupexponentialdecay", "warmupinversesquareroot"]:
+    if scheduler is None:
+        scheduler_step_at = "none"
+    else:
+        assert scheduler_step_at in {"validation", "epoch", "step", "none"}
+
+    # print log
+    if scheduler_name in ["noam", "warmupexponentialdecay",
+                          "warmupinversesquareroot"]:
         logger.info(scheduler)
     else:
         logger.info("%s(%s)", scheduler.__class__.__name__,
-            ", ".join(['{}={}'.format(k, v) for k, v in kwargs.items()]))
+                    ", ".join([f'{k}={v}' for k, v in kwargs.items()]))
     return scheduler, scheduler_step_at
 
 
@@ -216,8 +221,7 @@ class BaseScheduler:
 
     def step(self, step):
         """Update parameters and rate"""
-        #self._step += 1
-        self._step = step + 1 # sync with trainer.stats.steps
+        self._step = step + 1   # sync with trainer.stats.steps
         rate = self._compute_rate()
         for p in self.optimizer.param_groups:
             p['lr'] = rate
@@ -246,9 +250,6 @@ class NoamScheduler(BaseScheduler):
         :param warmup: number of warmup steps
         """
         super().__init__(optimizer)
-        #self.optimizer = optimizer
-        #self._step = 0
-        #self._rate = 0
         self.warmup = warmup
         self.factor = factor
         self.hidden_size = hidden_size
@@ -256,9 +257,8 @@ class NoamScheduler(BaseScheduler):
     def _compute_rate(self):
         """Implement `lrate` above"""
         step = self._step
-        return self.factor * \
-            (self.hidden_size ** (-0.5) *
-                min(step ** (-0.5), step * self.warmup ** (-1.5)))
+        upper_bound = min(step ** (-0.5), step * self.warmup ** (-1.5))
+        return self.factor * (self.hidden_size ** (-0.5) * upper_bound)
 
     def state_dict(self):
         """Returns dictionary of values necessary to reconstruct scheduler"""
@@ -304,9 +304,6 @@ class WarmupExponentialDecayScheduler(BaseScheduler):
         :param min_rate: minimum learning rate
         """
         super().__init__(optimizer)
-        #self.optimizer = optimizer
-        #self._step = 0
-        #self._rate = 0
         self.warmup = warmup
         self.decay_length = decay_length
         self.peak_rate = peak_rate
@@ -345,10 +342,12 @@ class WarmupExponentialDecayScheduler(BaseScheduler):
         self.min_rate = state_dict['min_rate']
 
     def __repr__(self):
-        return "%s(warmup=%d, decay_length=%d, decay_rate=%f, " \
-               "peak_rate=%f, min_rate=%f)" % (
-            self.__class__.__name__, self.warmup, self.decay_length,
-            self.decay_rate, self.peak_rate, self.min_rate)
+        return f"{self.__class__.__name__}(warmup={self.warmup}, " \
+               f"decay_length={self.decay_length}, " \
+               f"decay_rate={self.decay_rate}, " \
+               f"peak_rate={self.peak_rate}, " \
+               f"min_rate={self.min_rate})"
+
 
 # from fairseq
 class WarmupInverseSquareRootScheduler(BaseScheduler):
@@ -356,8 +355,8 @@ class WarmupInverseSquareRootScheduler(BaseScheduler):
     We also support a warmup phase where we linearly increase the learning rate
 
     After warmup::
-      decay_factor = peak_rate * sqrt(warmup) # constant value
-      lr = decay_factor / sqrt(step)
+        decay_factor = peak_rate * sqrt(warmup) # constant value
+        lr = decay_factor / sqrt(step)
     """
 
     def __init__(self,
@@ -377,7 +376,7 @@ class WarmupInverseSquareRootScheduler(BaseScheduler):
         self.warmup = warmup
         self.min_rate = min_rate
         self.peak_rate = peak_rate
-        self.decay_rate = peak_rate * (warmup ** 0.5) # constant value
+        self.decay_rate = peak_rate * (warmup ** 0.5)   # constant value
 
     def _compute_rate(self):
         """Implement `lrate` above"""

@@ -1,20 +1,22 @@
 # coding: utf-8
-
+"""
+Various encoders
+"""
 import torch
-import torch.nn as nn
 from torch import Tensor
+import torch.nn as nn
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 from joeynmt.helpers import freeze_params
-from joeynmt.transformer_layers import \
-    TransformerEncoderLayer, PositionalEncoding
+from joeynmt.transformer_layers import PositionalEncoding, \
+    TransformerEncoderLayer
 
 
 class Encoder(nn.Module):
     """
     Base encoder class
     """
-    #pylint: disable=abstract-method
+    # pylint: disable=abstract-method
     @property
     def output_size(self):
         """
@@ -27,7 +29,7 @@ class Encoder(nn.Module):
 
 class RecurrentEncoder(Encoder):
     """Encodes a sequence of word embeddings"""
-    #pylint: disable=unused-argument
+    # pylint: disable=unused-argument
     def __init__(self,
                  rnn_type: str = "gru",
                  hidden_size: int = 1,
@@ -79,10 +81,10 @@ class RecurrentEncoder(Encoder):
         :param src_length: source length
         :param mask: source mask
         """
-        #pylint: disable=invalid-name, unused-argument
+        # pylint: disable=invalid-name, unused-argument
         assert embed_src.shape[0] == src_length.shape[0]
         assert embed_src.shape[2] == self.emb_size
-        #assert mask.shape == embed_src.shape
+        # assert mask.shape == embed_src.shape
         assert len(src_length.shape) == 1
 
     def forward(self, embed_src: Tensor, src_length: Tensor, mask: Tensor,
@@ -104,7 +106,7 @@ class RecurrentEncoder(Encoder):
             - hidden_concat: last hidden state with
                 shape (batch_size, directions*hidden)
         """
-        #pylint: disable=arguments-differ
+        # pylint: disable=arguments-differ
         self._check_shapes_input_forward(embed_src=embed_src,
                                          src_length=src_length,
                                          mask=mask)
@@ -118,7 +120,7 @@ class RecurrentEncoder(Encoder):
         output, hidden = self.rnn(packed)
 
         if isinstance(hidden, tuple):
-            hidden, memory_cell = hidden #pylint: disable=unused-variable
+            hidden, memory_cell = hidden    # pylint: disable=unused-variable
 
         output, _ = pad_packed_sequence(output, batch_first=True,
                                         total_length=total_length)
@@ -172,7 +174,7 @@ class TransformerEncoder(Encoder):
         :param freeze: freeze the parameters of the encoder during training
         :param kwargs:
         """
-        #pylint: disable=unused-argument
+        # pylint: disable=unused-argument
         super().__init__()
 
         # build all (num_layers) layers
@@ -212,7 +214,7 @@ class TransformerEncoder(Encoder):
             - hidden_concat: last hidden state with
                 shape (batch_size, directions*hidden)
         """
-        #pylint: disable=unused-argument
+        # pylint: disable=unused-argument
         x = self.pe(embed_src)  # add position encoding to word embeddings
         x = self.emb_dropout(x)
 

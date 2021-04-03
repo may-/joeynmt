@@ -4,8 +4,9 @@ Module to implement training loss
 """
 
 import torch
-from torch import nn, Tensor
+from torch import Tensor, nn
 from torch.autograd import Variable
+from torch.nn.modules.loss import _Loss
 
 
 class XentLoss(nn.Module):
@@ -17,6 +18,7 @@ class XentLoss(nn.Module):
         super().__init__()
         self.smoothing = smoothing
         self.pad_index = pad_index
+        self.criterion: _Loss   # (type annotation)
         if self.smoothing <= 0.0:
             # standard xent loss
             self.criterion = nn.NLLLoss(ignore_index=self.pad_index,
@@ -25,7 +27,7 @@ class XentLoss(nn.Module):
             # custom label-smoothed loss, computed with KL divergence loss
             self.criterion = nn.KLDivLoss(reduction='sum')
 
-    def _smooth_targets(self, targets: Tensor, vocab_size: int):
+    def _smooth_targets(self, targets: Tensor, vocab_size: int) -> Variable:
         """
         Smooth target distribution. All non-reference words get uniform
         probability mass according to "smoothing".
@@ -39,17 +41,17 @@ class XentLoss(nn.Module):
         # fill distribution uniformly with smoothing
         smooth_dist.fill_(self.smoothing / (vocab_size - 2))
         # assign true label the probability of 1-smoothing ("confidence")
-        smooth_dist.scatter_(1, targets.unsqueeze(1).data, 1.0-self.smoothing)
+        smooth_dist.scatter_(1, targets.unsqueeze(1).data, 1.0 - self.smoothing)
         # give padding probability of 0 everywhere
         smooth_dist[:, self.pad_index] = 0
         # masking out padding area (sum of probabilities for padding area = 0)
         padding_positions = torch.nonzero(targets.data == self.pad_index,
-            as_tuple=False)
+                                          as_tuple=False)
         if len(padding_positions) > 0:
             smooth_dist.index_fill_(0, padding_positions.squeeze(), 0.0)
         return Variable(smooth_dist, requires_grad=False)
 
-    def forward(self, log_probs, targets):
+    def forward(self, log_probs: Tensor, targets: Tensor) -> Tensor:
         """
         Compute the cross-entropy between logits and targets.
 

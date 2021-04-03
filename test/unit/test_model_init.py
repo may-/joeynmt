@@ -1,13 +1,11 @@
-from torch.nn import GRU, LSTM
+import copy
+from test.unit.test_helpers import TensorTestCase
+
 import torch
 from torch import nn
-import numpy as np
 
-from joeynmt.encoders import RecurrentEncoder
-from .test_helpers import TensorTestCase
 from joeynmt.model import build_model
 from joeynmt.vocabulary import Vocabulary
-import copy
 
 
 class TestModelInit(TensorTestCase):
@@ -48,7 +46,7 @@ class TestModelInit(TensorTestCase):
                             src_vocab=src_vocab, trg_vocab=trg_vocab)
 
         def check_layer_norm(m: nn.Module):
-            for name, child in m.named_children():
+            for _, child in m.named_children():
                 if isinstance(child, nn.LayerNorm):
                     self.assertTensorEqual(child.weight,
                                            torch.ones([self.hidden_size]))

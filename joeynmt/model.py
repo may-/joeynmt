@@ -2,21 +2,21 @@
 """
 Module to represents whole models
 """
-from pathlib import Path
-from typing import Callable
 import logging
-import numpy as np
+from pathlib import Path
+from typing import Callable, Tuple
 
+import numpy as np
 from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
 
-from joeynmt.initialization import initialize_model
+from joeynmt.decoders import Decoder, RecurrentDecoder, TransformerDecoder
 from joeynmt.embeddings import Embeddings
 from joeynmt.encoders import Encoder, RecurrentEncoder, TransformerEncoder
-from joeynmt.decoders import Decoder, RecurrentDecoder, TransformerDecoder
-from joeynmt.vocabulary import Vocabulary
 from joeynmt.helpers import ConfigurationError
+from joeynmt.initialization import initialize_model
+from joeynmt.vocabulary import Vocabulary
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,7 @@ class Model(nn.Module):
         self.pad_index = self.trg_vocab.pad_index
         self.bos_index = self.trg_vocab.bos_index
         self.eos_index = self.trg_vocab.eos_index
-        #self.loss_function = None # set by the TrainManager
+        # self.loss_function = None # set by the TrainManager
 
     @property
     def loss_function(self):
@@ -64,7 +64,7 @@ class Model(nn.Module):
         self._loss_function = loss_function
 
     def forward(self, return_type: str = None, **kwargs) \
-            -> (Tensor, Tensor, Tensor, Tensor):
+            -> Tuple[Tensor, Tensor, Tensor, Tensor]:
         """ Interface for multi-gpu
 
         For DataParallel, We need to encapsulate all model call: model.encode(),
@@ -110,7 +110,7 @@ class Model(nn.Module):
 
     def _encode_decode(self, src: Tensor, trg_input: Tensor, src_mask: Tensor,
                        src_length: Tensor, trg_mask: Tensor = None, **kwargs) \
-            -> (Tensor, Tensor, Tensor, Tensor):
+            -> Tuple[Tensor, Tensor, Tensor, Tensor]:
         """
         First encodes the source sentence.
         Then produces the target one word at a time.
@@ -136,7 +136,7 @@ class Model(nn.Module):
                             trg_mask=trg_mask, **kwargs)
 
     def _encode(self, src: Tensor, src_length: Tensor, src_mask: Tensor,
-                **_kwargs) -> (Tensor, Tensor):
+                **_kwargs) -> Tuple[Tensor, Tensor]:
         """
         Encodes the source sentence.
 
@@ -152,7 +152,7 @@ class Model(nn.Module):
                 src_mask: Tensor, trg_input: Tensor,
                 unroll_steps: int, decoder_hidden: Tensor = None,
                 att_vector: Tensor = None, trg_mask: Tensor = None, **_kwargs) \
-            -> (Tensor, Tensor, Tensor, Tensor):
+            -> Tuple[Tensor, Tensor, Tensor, Tensor]:
         """
         Decode, given an encoded source sentence.
 
@@ -296,10 +296,11 @@ def build_model(cfg: dict = None,
     # initialize embeddings from file
     enc_embed_path = cfg["encoder"]["embeddings"].get("load_pretrained", None)
     dec_embed_path = cfg["decoder"]["embeddings"].get("load_pretrained", None)
-    if enc_embed_path:
+    if enc_embed_path and src_vocab is not None:
         logger.info("Loading pretraind src embeddings...")
         model.src_embed.load_from_file(Path(enc_embed_path), src_vocab)
-    if dec_embed_path and not cfg.get("tied_embeddings", False):
+    if dec_embed_path and src_vocab is not None \
+            and not cfg.get("tied_embeddings", False):
         logger.info("Loading pretraind trg embeddings...")
         model.trg_embed.load_from_file(Path(dec_embed_path), trg_vocab)
 

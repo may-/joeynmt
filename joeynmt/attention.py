@@ -2,6 +2,7 @@
 """
 Attention modules
 """
+from typing import Tuple
 
 import torch
 from torch import Tensor
@@ -22,10 +23,11 @@ class BahdanauAttention(AttentionMechanism):
     """
     Implements Bahdanau (MLP) attention
 
-    Section A.1.2 in https://arxiv.org/pdf/1409.0473.pdf.
+    Section A.1.2 in https://arxiv.org/abs/1409.0473.
     """
 
-    def __init__(self, hidden_size=1, key_size=1, query_size=1):
+    def __init__(self, hidden_size: int = 1, key_size: int = 1,
+                 query_size: int = 1):
         """
         Creates attention mechanism.
 
@@ -43,9 +45,8 @@ class BahdanauAttention(AttentionMechanism):
         self.proj_keys = None   # to store projected keys
         self.proj_query = None  # projected query
 
-    def forward(self, query: Tensor = None,
-                mask: Tensor = None,
-                values: Tensor = None):
+    def forward(self, query: Tensor, mask: Tensor, values: Tensor) \
+            -> Tuple[Tensor, Tensor]:
         """
         Bahdanau MLP attention forward pass.
 
@@ -55,8 +56,9 @@ class BahdanauAttention(AttentionMechanism):
             shape (batch_size, 1, src_length)
         :param values: values (encoder states),
             shape (batch_size, src_length, encoder.hidden_size)
-        :return: context vector of shape (batch_size, 1, value_size),
-            attention probabilities of shape (batch_size, 1, src_length)
+        :return:
+            - context vector of shape (batch_size, 1, value_size),
+            - attention probabilities of shape (batch_size, 1, src_length)
         """
         # pylint: disable=arguments-differ
         self._check_input_shapes_forward(query=query, mask=mask, values=values)
@@ -66,7 +68,7 @@ class BahdanauAttention(AttentionMechanism):
             "projection keys have to get pre-computed"
 
         # We first project the query (the decoder state).
-        # The projected keys (the encoder states) were already pre-computated.
+        # The projected keys (the encoder states) were already pre-computed.
         self.compute_proj_query(query)
 
         # Calculate scores.
@@ -89,7 +91,7 @@ class BahdanauAttention(AttentionMechanism):
 
         return context, alphas
 
-    def compute_proj_keys(self, keys: Tensor):
+    def compute_proj_keys(self, keys: Tensor) -> None:
         """
         Compute the projection of the keys.
         Is efficient if pre-computed before receiving individual queries.
@@ -99,7 +101,7 @@ class BahdanauAttention(AttentionMechanism):
         """
         self.proj_keys = self.key_layer(keys)
 
-    def compute_proj_query(self, query: Tensor):
+    def compute_proj_query(self, query: Tensor) -> None:
         """
         Compute the projection of the query.
 
@@ -110,7 +112,7 @@ class BahdanauAttention(AttentionMechanism):
 
     def _check_input_shapes_forward(self, query: torch.Tensor,
                                     mask: torch.Tensor,
-                                    values: torch.Tensor):
+                                    values: torch.Tensor) -> None:
         """
         Make sure that inputs to `self.forward` are of correct shape.
         Same input semantics as for `self.forward`.
@@ -152,9 +154,8 @@ class LuongAttention(AttentionMechanism):
                                    bias=False)
         self.proj_keys = None  # projected keys
 
-    def forward(self, query: torch.Tensor = None,
-                mask: torch.Tensor = None,
-                values: torch.Tensor = None):
+    def forward(self, query: Tensor, mask: Tensor, values: Tensor) \
+            -> Tuple[Tensor, Tensor]:
         """
         Luong (multiplicative / bilinear) attention forward pass.
         Computes context vectors and attention scores for a given query and
@@ -166,8 +167,9 @@ class LuongAttention(AttentionMechanism):
             shape (batch_size, 1, src_length)
         :param values: values (encoder states),
             shape (batch_size, src_length, encoder.hidden_size)
-        :return: context vector of shape (batch_size, 1, value_size),
-            attention probabilities of shape (batch_size, 1, src_length)
+        :return:
+            - context vector of shape (batch_size, 1, value_size),
+            - attention probabilities of shape (batch_size, 1, src_length)
         """
         # pylint: disable=arguments-differ
         self._check_input_shapes_forward(query=query, mask=mask, values=values)
@@ -190,7 +192,7 @@ class LuongAttention(AttentionMechanism):
 
         return context, alphas
 
-    def compute_proj_keys(self, keys: Tensor):
+    def compute_proj_keys(self, keys: Tensor) -> None:
         """
         Compute the projection of the keys and assign them to `self.proj_keys`.
         This pre-computation is efficiently done for all keys
@@ -201,9 +203,9 @@ class LuongAttention(AttentionMechanism):
         # proj_keys: batch x src_len x hidden_size
         self.proj_keys = self.key_layer(keys)
 
-    def _check_input_shapes_forward(self, query: torch.Tensor,
-                                    mask: torch.Tensor,
-                                    values: torch.Tensor):
+    def _check_input_shapes_forward(self, query: Tensor,
+                                    mask: Tensor,
+                                    values: Tensor) -> None:
         """
         Make sure that inputs to `self.forward` are of correct shape.
         Same input semantics as for `self.forward`.

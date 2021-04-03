@@ -1,7 +1,8 @@
+from test.unit.test_helpers import TensorTestCase
+
 import torch
 
 from joeynmt.loss import XentLoss
-from .test_helpers import TensorTestCase
 
 
 class TestTransformerUtils(TensorTestCase):
@@ -28,8 +29,8 @@ class TestTransformerUtils(TensorTestCase):
                                     [1, 0]])
 
         # test the smoothing function
-        smoothed_targets = criterion._smooth_targets(targets=targets.view(-1),
-                                      vocab_size=predict.size(-1))
+        smoothed_targets = criterion._smooth_targets(
+            targets=targets.view(-1), vocab_size=predict.size(-1))
         self.assertTensorAlmostEqual(
             smoothed_targets,
             torch.Tensor(
@@ -40,7 +41,7 @@ class TestTransformerUtils(TensorTestCase):
                  [0.0000, 0.6000, 0.1333, 0.1333, 0.1333],
                  [0.0000, 0.0000, 0.0000, 0.0000, 0.0000]])
         )
-        assert torch.max(smoothed_targets) == 1-smoothing
+        assert torch.max(smoothed_targets) == 1 - smoothing
 
         # test the loss computation
         v = criterion(predict.log(), targets)
@@ -64,8 +65,8 @@ class TestTransformerUtils(TensorTestCase):
                                     [1, 0]])
 
         # test the smoothing function: should still be one-hot
-        smoothed_targets = criterion._smooth_targets(targets=targets.view(-1),
-                                      vocab_size=predict.size(-1))
+        smoothed_targets = criterion._smooth_targets(
+            targets=targets.view(-1), vocab_size=predict.size(-1))
 
         assert torch.max(smoothed_targets) == 1
         assert torch.min(smoothed_targets) == 0

@@ -1,7 +1,9 @@
 import unittest
 
-from joeynmt.batch import Batch
+import torch
+
 from joeynmt.data import TranslationDataset, load_data, make_data_iter
+
 
 class TestData(unittest.TestCase):
 
@@ -24,22 +26,24 @@ class TestData(unittest.TestCase):
         current_cfg = self.data_cfg.copy()
 
         # load toy data
-        train_data, dev_data, test_data, src_vocab, trg_vocab = \
+        src_vocab, trg_vocab, train_data, dev_data, test_data = \
             load_data(current_cfg)
 
         # make batches by number of sentences
-        train_iter = iter(make_data_iter(train_data, batch_size=10,
-            batch_type="sentence", batch_class=Batch, shuffle=True,
-            seed=self.seed, pad_index=trg_vocab.pad_index, num_workers=0))
+        train_iter = iter(make_data_iter(
+            train_data, batch_size=10, batch_type="sentence", shuffle=True,
+            seed=self.seed, pad_index=trg_vocab.pad_index,
+            device=torch.device("cpu"), num_workers=0))
         batch = next(train_iter)
 
         self.assertEqual(batch.src.shape[0], 10)
         self.assertEqual(batch.trg.shape[0], 10)
 
         # make batches by number of tokens
-        train_iter = iter(make_data_iter(train_data, batch_size=100,
-            batch_type="token", batch_class=Batch, shuffle=True,
-            seed=self.seed, pad_index=trg_vocab.pad_index, num_workers=0))
+        train_iter = iter(make_data_iter(
+            train_data, batch_size=100, batch_type="token", shuffle=True,
+            seed=self.seed, pad_index=trg_vocab.pad_index,
+            device=torch.device("cpu"), num_workers=0))
         _ = next(train_iter)  # skip a batch
         _ = next(train_iter)  # skip another batch
         batch = next(train_iter)
@@ -61,7 +65,7 @@ class TestData(unittest.TestCase):
                         datasets.append("test")
 
                     # load the data
-                    train_data, dev_data, test_data, src_vocab, trg_vocab = \
+                    src_vocab, trg_vocab, train_data, dev_data, test_data = \
                         load_data(current_cfg, datasets=datasets)
 
                     self.assertIs(type(train_data), TranslationDataset)
@@ -151,13 +155,13 @@ class TestData(unittest.TestCase):
         current_cfg["random_train_subset"] = -1
 
         # load the data
-        train_data, dev_data, test_data, src_vocab, trg_vocab = \
+        src_vocab, trg_vocab, train_data, dev_data, test_data = \
             load_data(current_cfg)
         self.assertEqual(len(train_data), 382)
-        #assert len(train_data) == 382
+        # assert len(train_data) == 382
 
         current_cfg["random_train_subset"] = 10
-        train_data, dev_data, test_data, src_vocab, trg_vocab = \
+        src_vocab, trg_vocab, train_data, dev_data, test_data = \
             load_data(current_cfg)
         self.assertEqual(len(train_data), 10)
-        #assert len(train_data) == 10
+        # assert len(train_data) == 10

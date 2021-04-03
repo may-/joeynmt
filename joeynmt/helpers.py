@@ -3,34 +3,36 @@
 Collection of helper functions
 """
 from __future__ import annotations
-import copy
-import shutil
-import random
-import logging
-from typing import Optional, List, Any, TYPE_CHECKING
-from pathlib import Path
-import functools
-import operator
-import yaml
-import pkg_resources
-import numpy as np
 
+import copy
+import functools
+import logging
+import operator
+from pathlib import Path
+import random
+import shutil
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+import numpy as np
 import torch
-from torch import nn, Tensor
+from torch import Tensor, nn
 from torch.utils.tensorboard import SummaryWriter
-from torch.utils.data import Dataset
+
+import pkg_resources
+import yaml
 
 from joeynmt.plotting import plot_heatmap
 
 if TYPE_CHECKING:
-    from joeynmt.vocabulary import Vocabulary # to avoid circular import
+    from joeynmt.data import TranslationDataset as Dataset
+    from joeynmt.vocabulary import Vocabulary  # to avoid circular import
 
 
 class ConfigurationError(Exception):
     """ Custom exception for misspecifications of configuration """
 
 
-def make_model_dir(model_dir: Path, overwrite=False) -> Path:
+def make_model_dir(model_dir: Path, overwrite: bool = False) -> Path:
     """
     Create a new directory for the model.
 
@@ -85,7 +87,7 @@ def make_logger(log_dir: Path = None, mode: str = "train") -> str:
     return version
 
 
-def log_cfg(cfg: dict, prefix: str = "cfg") -> None:
+def log_cfg(cfg: Dict, prefix: str = "cfg") -> None:
     """
     Write configuration to log.
 
@@ -139,16 +141,17 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def log_data_info(train_data: Dataset, valid_data: Dataset, test_data: Dataset,
-                  src_vocab: Vocabulary, trg_vocab: Vocabulary) -> None:
+def log_data_info(src_vocab: Vocabulary, trg_vocab: Vocabulary,
+                  train_data: Optional[Dataset], valid_data: Optional[Dataset],
+                  test_data: Optional[Dataset]) -> None:
     """
     Log statistics of data and vocabulary.
 
+    :param src_vocab:
+    :param trg_vocab:
     :param train_data:
     :param valid_data:
     :param test_data:
-    :param src_vocab:
-    :param trg_vocab:
     """
     logger = logging.getLogger(__name__)
     logger.info("Train data: %s", train_data)
@@ -157,8 +160,7 @@ def log_data_info(train_data: Dataset, valid_data: Dataset, test_data: Dataset,
 
     if train_data:
         logger.info("First training example:\n\t[SRC] %s\n\t[TRG] %s",
-                    " ".join(train_data.src[0]),
-                    " ".join(train_data.trg[0]))
+                    " ".join(train_data.src[0]), " ".join(train_data.trg[0]))
 
     logger.info("First 10 Src tokens: %s", src_vocab.log_vocab(10))
     logger.info("First 10 Trg tokens: %s", trg_vocab.log_vocab(10))
@@ -167,7 +169,7 @@ def log_data_info(train_data: Dataset, valid_data: Dataset, test_data: Dataset,
     logger.info("Number of unique Trg tokens (vocab_size): %d", len(trg_vocab))
 
 
-def load_config(path: Path = Path("configs/default.yaml")) -> dict:
+def load_config(path: Path = Path("configs/default.yaml")) -> Dict:
     """
     Loads and parses a YAML configuration file.
 
@@ -208,7 +210,7 @@ def bpe_postprocess(string, bpe_type="subword-nmt") -> str:
     return ret
 
 
-def store_attention_plots(attentions: np.array,
+def store_attention_plots(attentions: np.ndarray,
                           targets: List[List[str]],
                           sources: List[List[str]],
                           output_prefix: str,
@@ -249,7 +251,7 @@ def store_attention_plots(attentions: np.array,
                                    dpi=50)
                 tb_writer.add_figure("attention/{}.".format(i),
                                      fig, global_step=steps)
-        except: # pylint: disable=bare-except
+        except Exception:
             print("Couldn't plot example {}: src len {}, trg len {}, "
                   "attention scores shape {}".format(i, len(src), len(trg),
                                                      attention_scores.shape))
@@ -277,7 +279,7 @@ def get_latest_checkpoint(ckpt_dir: Path) -> Optional[Path]:
     return latest_checkpoint
 
 
-def load_checkpoint(path: Path, device: torch.device) -> dict:
+def load_checkpoint(path: Path, device: torch.device) -> Dict:
     """
     Load model from saved checkpoint.
 
@@ -291,6 +293,27 @@ def load_checkpoint(path: Path, device: torch.device) -> dict:
     logger.info("Load model from %s.", path.resolve())
     return checkpoint
 
+
+def resolve_ckpt_path(ckpt: str, load_model: str, model_dir: Path) -> Path:
+    """
+    resolve checkpoint path
+
+    :param ckpt: str passed from stdin args (--ckpt)
+    :param load_model: config entry (cfg['training']['load_model'])
+    :param model_dir: Path(cfg['training']['model_dir'])
+    :return:
+    """
+    if ckpt is None:
+        if load_model is None:
+            if (model_dir / "best.ckpt").is_file():
+                ckpt = model_dir / "best.ckpt"
+            else:
+                ckpt = get_latest_checkpoint(model_dir)
+        else:
+            ckpt = Path(load_model)
+    else:
+        ckpt = Path(ckpt)
+    return ckpt
 
 # from onmt
 def tile(x: Tensor, count: int, dim=0) -> Tensor:
@@ -348,7 +371,6 @@ def delete_ckpt(to_delete: Path) -> None:
         logger.warning(
             "Wanted to delete old checkpoint %s but "
             "file does not exist. (%s)", to_delete, e)
-        #raise e
 
 
 def symlink_update(target: Path, link_name: Path) -> Optional[Path]:

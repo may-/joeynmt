@@ -1,19 +1,19 @@
 #!/usr/bin/env python
 
 from typing import List, Optional
-import numpy as np
 
-# pylint: disable=wrong-import-position
 import matplotlib
-matplotlib.use('Agg')
+
+matplotlib.use('Agg')   # pylint: disable=wrong-import-position
 
 from matplotlib import rcParams
+from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
-from matplotlib.backends.backend_pdf import PdfPages
+import numpy as np
 
 
-def plot_heatmap(scores: np.array, column_labels: List[str],
+def plot_heatmap(scores: np.ndarray, column_labels: List[str],
                  row_labels: List[str], output_path: Optional[str] = None,
                  dpi: int = 300) -> Figure:
 
@@ -32,7 +32,7 @@ def plot_heatmap(scores: np.array, column_labels: List[str],
 
     if output_path is not None:
         assert output_path.endswith(".png") or output_path.endswith(".pdf"), \
-        "output path must have .png or .pdf extension"
+            "output path must have .png or .pdf extension"
 
     x_sent_len = len(column_labels)
     y_sent_len = len(row_labels)
@@ -46,9 +46,9 @@ def plot_heatmap(scores: np.array, column_labels: List[str],
     # font config
     rcParams['xtick.labelsize'] = labelsize
     rcParams['ytick.labelsize'] = labelsize
-    #rcParams['font.family'] = "sans-serif"
-    #rcParams['font.sans-serif'] = ["Fira Sans"]
-    #rcParams['font.weight'] = "regular"
+    # rcParams['font.family'] = "sans-serif"
+    # rcParams['font.sans-serif'] = ["Fira Sans"]
+    # rcParams['font.weight'] = "regular"
 
     fig, ax = plt.subplots(figsize=(10, 10), dpi=dpi)
     plt.imshow(scores, cmap='viridis', aspect='equal',

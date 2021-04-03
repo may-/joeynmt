@@ -1,7 +1,8 @@
+from test.unit.test_helpers import TensorTestCase
+
 import torch
 
 from joeynmt.decoders import TransformerDecoder, TransformerDecoderLayer
-from .test_helpers import TensorTestCase
 
 
 class TestTransformerDecoder(TensorTestCase):
@@ -18,7 +19,7 @@ class TestTransformerDecoder(TensorTestCase):
 
     def test_transformer_decoder_freeze(self):
         decoder = TransformerDecoder(freeze=True)
-        for n, p in decoder.named_parameters():
+        for _, p in decoder.named_parameters():
             self.assertFalse(p.requires_grad)
 
     def test_transformer_decoder_output_size(self):

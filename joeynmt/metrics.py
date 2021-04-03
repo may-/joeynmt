@@ -4,10 +4,12 @@ This module holds various MT evaluation metrics.
 """
 
 from typing import List
+
 import sacrebleu
 
 
-def chrf(hypotheses, references, remove_whitespace=True):
+def chrf(hypotheses: List[str], references: List[str],
+         remove_whitespace: bool = True) -> float:
     """
     Character F-score from sacrebleu
 
@@ -20,7 +22,8 @@ def chrf(hypotheses, references, remove_whitespace=True):
                                  remove_whitespace=remove_whitespace).score
 
 
-def bleu(hypotheses, references, tokenize="13a"):
+def bleu(hypotheses: List[str], references: List[str], tokenize: str = "13a") \
+        -> float:
     """
     Raw corpus BLEU from sacrebleu (without tokenization)
 
@@ -53,10 +56,10 @@ def token_accuracy(hypotheses: List[List[str]], references: List[List[str]]) \
             # min(len(h), len(r)) tokens considered
             if h_i == r_i:
                 correct_tokens += 1
-    return (correct_tokens / all_tokens)*100 if all_tokens > 0 else 0.0
+    return (correct_tokens / all_tokens) * 100 if all_tokens > 0 else 0.0
 
 
-def sequence_accuracy(hypotheses, references):
+def sequence_accuracy(hypotheses: List[str], references: List[str]) -> float:
     """
     Compute the accuracy of hypothesis tokens: correct tokens / all tokens
     Tokens are correct if they appear in the same position in the reference.
@@ -68,4 +71,4 @@ def sequence_accuracy(hypotheses, references):
     assert len(hypotheses) == len(references)
     correct_sequences = sum([1 for (hyp, ref) in zip(hypotheses, references)
                              if hyp == ref])
-    return (correct_sequences / len(hypotheses))*100 if hypotheses else 0.0
+    return (correct_sequences / len(hypotheses)) * 100 if hypotheses else 0.0

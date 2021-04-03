@@ -2,7 +2,7 @@
 # coding: utf-8
 
 """
-Checkpoint averaging 
+Checkpoint averaging
 
 Mainly follows:
 https://github.com/pytorch/fairseq/blob/master/scripts/average_checkpoints.py
@@ -10,8 +10,9 @@ https://github.com/pytorch/fairseq/blob/master/scripts/average_checkpoints.py
 
 import argparse
 import collections
-import torch
 from typing import List
+
+import torch
 
 
 def average_checkpoints(inputs: List[str]) -> dict:
@@ -40,7 +41,7 @@ def average_checkpoints(inputs: List[str]) -> dict:
         if new_state is None:
             new_state = state
 
-        # Averaging: only handle the network params. 
+        # Averaging: only handle the network params.
         model_params = state['model_state']
 
         model_params_keys = list(model_params.keys())
@@ -93,4 +94,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

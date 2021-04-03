@@ -1,5 +1,5 @@
-import unittest
 from pathlib import Path
+import unittest
 
 from joeynmt.vocabulary import Vocabulary
 
@@ -18,9 +18,9 @@ class TestVocabulary(unittest.TestCase):
         self.char_vocab = Vocabulary(tokens=sorted(list(set(self.char_list))))
 
     def testVocabularyFromList(self):
-        self.assertEqual(len(self.word_vocab)-len(self.word_vocab.specials),
+        self.assertEqual(len(self.word_vocab) - len(self.word_vocab.specials),
                          len(set(self.word_list)))
-        self.assertEqual(len(self.char_vocab)-len(self.char_vocab.specials),
+        self.assertEqual(len(self.char_vocab) - len(self.char_vocab.specials),
                          len(set(self.char_list)))
         expected_char_itos = ['<unk>', '<pad>', '<s>', '</s>',
                               ' ', ',', '.', 'D', 'G', 'K', 'M', 'T', 'W', 'a',

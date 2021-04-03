@@ -1,14 +1,15 @@
 #!/usr/bin/env python
 
-import numpy as np
 import os
+
+import numpy as np
 
 np.random.seed(42)
 
 
 def generate_samples(n=10000, low=0, high=10, maxlen=10):
     samples = []
-    for i in range(n):
+    for _ in range(n):
         size = np.random.randint(1, maxlen + 1)
         sample = np.random.randint(low, high, size)
         sample = [chr(ord('a') + x) for x in sample]
@@ -39,7 +40,7 @@ def generate_task(train="train", dev="dev", test="test", src="src", trg="trg"):
     save_samples(samples, prefix=train, ext=trg, reverse=False)
 
     # dev
-    samples = generate_samples(500, high=26,  maxlen=20)
+    samples = generate_samples(500, high=26, maxlen=20)
     save_samples(samples, prefix=dev, ext=src, reverse=False)
     save_samples(samples, prefix=dev, ext=trg, reverse=False)
 

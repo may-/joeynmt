@@ -1,7 +1,8 @@
+from test.unit.test_helpers import TensorTestCase
+
 import torch
 
 from joeynmt.transformer_layers import PositionalEncoding
-from .test_helpers import TensorTestCase
 
 
 class TestTransformerUtils(TensorTestCase):

@@ -1,7 +1,7 @@
-import unittest
 from test.unit.test_helpers import TensorTestCase
+import unittest
 
-from joeynmt.metrics import chrf, bleu, token_accuracy
+from joeynmt.metrics import bleu, chrf, token_accuracy
 
 
 class TestMetrics(TensorTestCase):
@@ -41,13 +41,13 @@ class TestMetrics(TensorTestCase):
         # if len(hyp) > len(ref)
         hyp = [list("tests")]
         ref = [list("tezt")]
-        #level = "char"
+        # level = "char"
         score = token_accuracy(hyp, ref)
         self.assertEqual(score, 60.0)
 
         # if len(hyp) < len(ref)
         hyp = [list("test")]
         ref = [list("tezts")]
-        #level = "char"
+        # level = "char"
         score = token_accuracy(hyp, ref)
         self.assertEqual(score, 75.0)

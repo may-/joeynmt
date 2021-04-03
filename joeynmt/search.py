@@ -1,20 +1,26 @@
 # coding: utf-8
-import torch
-import torch.nn.functional as F
-from torch import Tensor
-import numpy as np
+"""
+Search module
+"""
+from heapq import heappush, heappop
+from typing import Optional, Tuple
 
-from joeynmt.decoders import TransformerDecoder
-from joeynmt.model import Model
+import numpy as np
+import torch
+from torch import Tensor
+import torch.nn.functional as F
+
 from joeynmt.batch import Batch
+from joeynmt.decoders import RecurrentDecoder, TransformerDecoder
 from joeynmt.helpers import tile
+from joeynmt.model import Model
 
 __all__ = ["greedy", "transformer_greedy", "beam_search", "run_batch"]
 
 
 def greedy(src_mask: Tensor, max_output_length: int, model: Model,
            encoder_output: Tensor, encoder_hidden: Tensor) \
-        -> (np.array, np.array):
+        -> Tuple[np.ndarray, np.ndarray]:
     """
     Greedy decoding. Select the token word highest probability at each time
     step. This function is a wrapper that calls recurrent_greedy for
@@ -27,21 +33,22 @@ def greedy(src_mask: Tensor, max_output_length: int, model: Model,
     :param encoder_hidden: encoder last state for decoder initialization
     :return:
     """
-
     if isinstance(model.decoder, TransformerDecoder):
         # Transformer greedy decoding
-        greedy_fun = transformer_greedy
-    else:
+        return transformer_greedy(
+            src_mask, max_output_length, model, encoder_output, encoder_hidden)
+    elif isinstance(model.decoder, RecurrentDecoder):
         # Recurrent greedy decoding
-        greedy_fun = recurrent_greedy
+        return recurrent_greedy(
+            src_mask, max_output_length, model, encoder_output, encoder_hidden)
+    else:
+        raise NotImplementedError(
+            f"model.decoder({model.decoder.__class__.__name__}) not supported.")
 
-    return greedy_fun(
-        src_mask, max_output_length, model, encoder_output, encoder_hidden)
 
-
-def recurrent_greedy(
-        src_mask: Tensor, max_output_length: int, model: Model,
-        encoder_output: Tensor, encoder_hidden: Tensor) -> (np.array, np.array):
+def recurrent_greedy(src_mask: Tensor, max_output_length: int, model: Model,
+                     encoder_output: Tensor, encoder_hidden: Tensor) \
+        -> Tuple[np.ndarray, Optional[np.ndarray]]:
     """
     Greedy decoding: in each step, choose the word that gets highest score.
     Version for recurrent decoder.
@@ -66,7 +73,7 @@ def recurrent_greedy(
     prev_att_vector = None
     finished = src_mask.new_zeros((batch_size, 1)).byte()
 
-    for t in range(max_output_length): # pylint: disable=unused-variable
+    for _ in range(max_output_length):
         # decode one single step
         with torch.no_grad():
             logits, hidden, att_probs, prev_att_vector = model(
@@ -99,9 +106,9 @@ def recurrent_greedy(
     return stacked_output, stacked_attention_scores
 
 
-def transformer_greedy(
-        src_mask: Tensor, max_output_length: int, model: Model,
-        encoder_output: Tensor, encoder_hidden: Tensor) -> (np.array, None):
+def transformer_greedy(src_mask: Tensor, max_output_length: int, model: Model,
+                       encoder_output: Tensor, encoder_hidden: Tensor) \
+        -> Tuple[np.ndarray, Optional[np.ndarray]]:
     """
     Special greedy function for transformer, since it works differently.
     The transformer remembers all previous states and attends to them.
@@ -161,10 +168,10 @@ def transformer_greedy(
     return ys.detach().cpu().numpy(), None
 
 
-def beam_search(model: Model, size: int,
-                encoder_output: Tensor, encoder_hidden: Tensor,
-                src_mask: Tensor, max_output_length: int,
-                alpha: float, n_best: int = 1) -> (np.array, np.array):
+def beam_search(model: Model, size: int, encoder_output: Tensor,
+                encoder_hidden: Tensor, src_mask: Tensor,
+                max_output_length: int, alpha: float, n_best: int = 1) \
+        -> Tuple[np.ndarray, Optional[np.ndarray]]:
     """
     Beam search with size k.
     Inspired by OpenNMT-py, adapted for Transformer.
@@ -241,6 +248,8 @@ def beam_search(model: Model, size: int,
     topk_log_probs[:, 1:] = float("-inf")
 
     # Structure that holds finished hypotheses.
+    # hypotheses: List[List[Tuple[Tensor, Tensor]]]
+    _hypotheses = [[] for _ in range(batch_size)]
     hypotheses = [[] for _ in range(batch_size)]
 
     results = {
@@ -290,7 +299,7 @@ def beam_search(model: Model, size: int,
         curr_scores = log_probs.clone()
 
         # compute length penalty
-        if alpha > -1:
+        if alpha > 0:
             length_penalty = ((5.0 + (step + 1)) / 6.0) ** alpha
             curr_scores /= length_penalty
 
@@ -311,9 +320,8 @@ def beam_search(model: Model, size: int,
         topk_ids = topk_ids.fmod(trg_vocab_size)
 
         # map beam_index to batch_index in the flat representation
-        batch_index = (
-                topk_beam_index
-                + beam_offset[:topk_beam_index.size(0)].unsqueeze(1))
+        batch_index = (topk_beam_index
+                       + beam_offset[:topk_beam_index.size(0)].unsqueeze(1))
         select_indices = batch_index.view(-1)
 
         # append latest prediction
@@ -330,13 +338,14 @@ def beam_search(model: Model, size: int,
         # save finished hypotheses
         if is_finished.any():
             predictions = alive_seq.view(-1, size, alive_seq.size(-1))
-            for i in range(is_finished.size(0)):
-                b = batch_offset[i]
+            for i in range(is_finished.size(0)):    # loop over batch instances
+                b = batch_offset[i].item()
                 if end_condition[i]:
                     is_finished[i].fill_(1)
                 finished_hyp = is_finished[i].nonzero(as_tuple=False).view(-1)
                 # store finished hypotheses for this batch
-                for j in finished_hyp:
+                # finished_hyp has shape (batch_size, beam_size, steps_so_far)
+                for j in finished_hyp:  # loop over beam candidates
                     # Check if the prediction has more than one EOS.
                     # If it has more than one EOS, it means that the
                     # prediction should have already been added to
@@ -344,24 +353,32 @@ def beam_search(model: Model, size: int,
                     if (predictions[i, j, 1:] == eos_index).nonzero(
                             as_tuple=False).numel() < 2:
                         # ignore start_token
-                        hypotheses[b].append(
-                            (topk_scores[i, j], predictions[i, j, 1:])
-                        )
-                # if the batch reached the end, save the n_best hypotheses
+                        heappush(hypotheses[b],
+                                 (-topk_scores[i, j], predictions[i, j, 1:]))
+                        # topk_scores are log_likelihood, make it positive
+                        # (convert it to the negative log_likelihood)
+                        # so that heappop can choose the smallest node.
+
+                        # hypotheses[b].append(
+                        #     (topk_scores[i, j], predictions[i, j, 1:])
+                        # )
+                # if the instance reached the end, save the n_best hypotheses
                 if end_condition[i]:
-                    best_hyp = sorted(
-                        hypotheses[b], key=lambda x: x[0], reverse=True)
-                    for n, (score, pred) in enumerate(best_hyp):
-                        if n >= n_best:
-                            break
-                        results["scores"][b].append(score)
+                    # best_hyp = sorted(
+                    #     hypotheses[b], key=lambda x: x[0], reverse=True)
+                    # for n, (score, pred) in enumerate(best_hyp):
+                    #     if n >= n_best:
+                    #         break
+                    for _ in range(n_best):
+                        score, pred = heappop(hypotheses[b])
+                        results["scores"][b].append(-score)  # back to negative
                         results["predictions"][b].append(pred)
             non_finished = end_condition.eq(False).nonzero(
                 as_tuple=False).view(-1)
             # if all sentences are translated, no need to go further
             if len(non_finished) == 0:
                 break
-            # remove finished batches for the next step
+            # remove finished instances for the next step
             topk_log_probs = topk_log_probs.index_select(0, non_finished)
             batch_index = batch_index.index_select(0, non_finished)
             batch_offset = batch_offset.index_select(0, non_finished)
@@ -403,8 +420,8 @@ def beam_search(model: Model, size: int,
 
 
 def run_batch(model: Model, batch: Batch, max_output_length: int,
-              beam_size: int, beam_alpha: float,
-              n_best: int = 1) -> (np.array, np.array):
+              beam_size: int, beam_alpha: float, n_best: int = 1) \
+        -> Tuple[np.ndarray, Optional[np.ndarray]]:
     """
     Get outputs and attentions scores for a given batch
 
@@ -414,8 +431,9 @@ def run_batch(model: Model, batch: Batch, max_output_length: int,
     :param beam_size: size of the beam for beam search, if 0 use greedy
     :param beam_alpha: alpha value for beam search
     :param n_best: candidates to return
-    :return: stacked_output: hypotheses for batch,
-        stacked_attention_scores: attention scores for batch
+    :returns:
+        - stacked_output: hypotheses for batch,
+        - stacked_attention_scores: attention scores for batch
     """
     with torch.no_grad():
         encoder_output, encoder_hidden, _, _ = model(

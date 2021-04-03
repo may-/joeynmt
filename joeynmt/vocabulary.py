@@ -1,16 +1,15 @@
 # coding: utf-8
-
 """
 Vocabulary module
 """
 from collections import Counter
 from pathlib import Path
+from typing import Dict, List, Tuple
 
-from typing import List, Tuple
 import numpy as np
 
-from joeynmt.constants import UNK_TOKEN, EOS_TOKEN, BOS_TOKEN, PAD_TOKEN, \
-    UNK_ID, PAD_ID, BOS_ID, EOS_ID
+from joeynmt.constants import BOS_ID, BOS_TOKEN, EOS_ID, EOS_TOKEN, PAD_ID, \
+    PAD_TOKEN, UNK_ID, UNK_TOKEN
 from joeynmt.helpers import flatten, write_list_to_file
 
 
@@ -33,8 +32,8 @@ class Vocabulary:
         self.specials = [UNK_TOKEN, PAD_TOKEN, BOS_TOKEN, EOS_TOKEN]
 
         # don't allow to access _stoi and _itos outside of this class
-        self._stoi = {} # string to index
-        self._itos = [] # index to string
+        self._stoi: Dict[str, int] = {}     # string to index
+        self._itos: List[str] = []          # index to string
         if tokens is not None:
             self._from_list(tokens)
         elif file is not None:
@@ -49,7 +48,7 @@ class Vocabulary:
         assert self.eos_index == EOS_ID
         assert self._itos[UNK_ID] == UNK_TOKEN
 
-    def _from_list(self, tokens: List[str] = None) -> None:
+    def _from_list(self, tokens: List[str]) -> None:
         """
         Make vocabulary from list of tokens.
         Tokens are assumed to be unique and pre-selected.
@@ -57,7 +56,7 @@ class Vocabulary:
 
         :param tokens: list of tokens
         """
-        self.add_tokens(tokens=self.specials+tokens)
+        self.add_tokens(tokens=self.specials + tokens)
         assert len(self._stoi) == len(self._itos)
 
     def _from_file(self, file: Path) -> None:
@@ -123,8 +122,8 @@ class Vocabulary:
             return self._itos == other._itos
         return False
 
-    def array_to_sentence(self, array: np.array, cut_at_eos=True,
-                          skip_pad=True) -> List[str]:
+    def array_to_sentence(self, array: np.ndarray, cut_at_eos: bool = True,
+                          skip_pad: bool = True) -> List[str]:
         """
         Converts an array of IDs to a sentence, optionally cutting the result
         off at the end-of-sequence token.
@@ -144,8 +143,8 @@ class Vocabulary:
             sentence.append(s)
         return sentence
 
-    def arrays_to_sentences(self, arrays: np.array, cut_at_eos=True,
-                            skip_pad=True) -> List[List[str]]:
+    def arrays_to_sentences(self, arrays: np.ndarray, cut_at_eos: bool = True,
+                            skip_pad: bool = True) -> List[List[str]]:
         """
         Convert multiple arrays containing sequences of token IDs to their
         sentences, optionally cutting them off at the end-of-sequence token.

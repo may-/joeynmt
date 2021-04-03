@@ -1,8 +1,7 @@
 import argparse
 
+from joeynmt.prediction import test, translate
 from joeynmt.training import train
-from joeynmt.prediction import test
-from joeynmt.prediction import translate
 
 
 def main():

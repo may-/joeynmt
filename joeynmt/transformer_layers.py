@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 
 import math
+from typing import Optional
+
 import torch
-import torch.nn as nn
 from torch import Tensor
+import torch.nn as nn
 
 
 class MultiHeadedAttention(nn.Module):
@@ -36,7 +38,8 @@ class MultiHeadedAttention(nn.Module):
         self.softmax = nn.Softmax(dim=-1)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, k: Tensor, v: Tensor, q: Tensor, mask: Tensor = None):
+    def forward(self, k: Tensor, v: Tensor, q: Tensor,
+                mask: Optional[Tensor] = None) -> Tensor:
         """
         Computes multi-headed attention.
 
@@ -107,7 +110,7 @@ class PositionwiseFeedForward(nn.Module):
             nn.Dropout(dropout),
         )
 
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tensor:
         x_norm = self.layer_norm(x)
         return self.pwff_layer(x_norm) + x
 
@@ -128,7 +131,6 @@ class PositionalEncoding(nn.Module):
         Positional Encoding with maximum length max_len
         :param size:
         :param max_len:
-        :param dropout:
         """
         if size % 2 != 0:
             raise ValueError("Cannot use sin/cos positional encoding with "
@@ -144,7 +146,7 @@ class PositionalEncoding(nn.Module):
         self.register_buffer('pe', pe)
         self.dim = size
 
-    def forward(self, emb):
+    def forward(self, emb: Tensor) -> Tensor:
         """Embed inputs.
         Args:
             emb (FloatTensor): Sequence of word vectors
@@ -238,11 +240,8 @@ class TransformerDecoderLayer(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self,
-                x: Tensor = None,
-                memory: Tensor = None,
-                src_mask: Tensor = None,
-                trg_mask: Tensor = None) -> Tensor:
+    def forward(self, x: Tensor, memory: Tensor, src_mask: Tensor,
+                trg_mask: Tensor) -> Tensor:
         """
         Forward pass of a single Transformer decoder layer.
 
@@ -262,6 +261,6 @@ class TransformerDecoderLayer(nn.Module):
         h2 = self.src_trg_att(memory, memory, h1_norm, mask=src_mask)
 
         # final position-wise feed-forward layer
-        o = self.feed_forward(self.dropout(h2) + h1)
+        out = self.feed_forward(self.dropout(h2) + h1)
 
-        return o
+        return out

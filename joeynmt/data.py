@@ -3,23 +3,25 @@
 Data module
 """
 from __future__ import annotations
-import sys
-from pathlib import Path
+
 from functools import partial
-from typing import Optional, List, Tuple, Union, Callable
 import logging
+from pathlib import Path
+import sys
+from typing import Callable, List, Optional, Tuple, Union
+
 import numpy as np
-
 import torch
-from torch.utils.data import Dataset, Sampler, SequentialSampler, \
-    RandomSampler, BatchSampler, DataLoader
+from torch.utils.data import BatchSampler, DataLoader, Dataset, \
+    RandomSampler, Sampler, SequentialSampler
 
+from joeynmt.batch import Batch
 from joeynmt.constants import PAD_ID
 from joeynmt.helpers import log_data_info
-from joeynmt.vocabulary import build_vocab, Vocabulary
-from joeynmt.batch import Batch
+from joeynmt.vocabulary import Vocabulary, build_vocab
 
 logger = logging.getLogger(__name__)
+
 
 # multiprocessing
 try:
@@ -35,7 +37,8 @@ except ImportError as no_pd:
 
 
 def load_data(data_cfg: dict, datasets: list = None, num_workers: int = 0) \
-        -> (Dataset, Dataset, Optional[Dataset], Vocabulary, Vocabulary):
+        -> Tuple[Vocabulary, Vocabulary, Optional[Dataset], Optional[Dataset],
+                 Optional[Dataset]]:
     """
     Load train, dev and optionally test data as specified in configuration.
     Vocabularies are created from the training set with a limit of `voc_limit`
@@ -52,12 +55,12 @@ def load_data(data_cfg: dict, datasets: list = None, num_workers: int = 0) \
         ("data" part of configuration file)
     :param datasets: list of dataset names to load
     :param num_workers:
-    :return:
+    :returns:
+        - src_vocab: source vocabulary extracted from training data
+        - trg_vocab: target vocabulary extracted from training data
         - train_data: training dataset
         - dev_data: development dataset
         - test_data: test dataset if given, otherwise None
-        - src_vocab: source vocabulary extracted from training data
-        - trg_vocab: target vocabulary extracted from training data
     """
     if datasets is None:
         datasets = ["train", "dev", "test"]
@@ -152,8 +155,9 @@ def load_data(data_cfg: dict, datasets: list = None, num_workers: int = 0) \
                                        trg_padding=trg_vocab.sentences_to_ids)
 
     logger.info("Data loaded.")
-    log_data_info(train_data, dev_data, test_data, src_vocab, trg_vocab)
-    return train_data, dev_data, test_data, src_vocab, trg_vocab
+    log_data_info(src_vocab, trg_vocab, train_data, dev_data, test_data)
+    return src_vocab, trg_vocab, train_data, dev_data, test_data
+
 
 # should locate in top-level (global scope)
 def _apply(df: pd.DataFrame, level: str = "bpe", lowercase: bool = True,
@@ -167,10 +171,12 @@ def _apply(df: pd.DataFrame, level: str = "bpe", lowercase: bool = True,
         df['trg_mask'] = df['trg_tok'].apply(filter_fn)
     return df
 
+
 # should locate in top-level (global scope)
 def _tokenize(x: str, level: str = "bpe", lowercase: bool = True):
     x = x.strip().lower() if lowercase else x.strip()
     return list(x) if level == "char" else x.split()
+
 
 # should locate in top-level (global scope)
 def _filter(tokens: List[str], max_len: int = -1):
@@ -226,16 +232,30 @@ def read_data_file(path: Path, exts: Tuple[str, Union[str, None]],
         if trg_lang:
             trg_tok = [_tokenize(x, level, lowercase) for x in doc['trg']]
             src_list, trg_list = zip(*[(s, t) for s, t in zip(src_tok, trg_tok)
-                               if _filter(s, max_len) and _filter(t, max_len)])
+                                       if (_filter(s, max_len)
+                                           and _filter(t, max_len))])
             assert len(src_list) == len(trg_list)
         else:
             src_list = [s for s in src_tok if _filter(s, max_len)]
             trg_list = []
     return src_list, trg_list
 
+
 # should locate in top-level (global scope)
-def collate_fn(batch, src_process, trg_process, batch_class,
-               pad_index, device) -> Batch:
+def collate_fn(batch, src_process, trg_process, pad_index, device) -> Batch:
+    """
+    custom collate function
+    Note: you might need another custom collate_fn()
+        if you switch to a different batch class.
+        Please override the batch class here. (not in TrainManager)
+
+    :param batch:
+    :param src_process:
+    :param trg_process:
+    :param pad_index:
+    :param device:
+    :return: joeynmt batch object
+    """
     src_list, trg_list = zip(*batch)
     src, src_length = src_process(src_list)
 
@@ -243,17 +263,16 @@ def collate_fn(batch, src_process, trg_process, batch_class,
     if any(map(None.__ne__, trg_list)):
         trg, trg_length = trg_process(trg_list)
 
-    return batch_class(torch.LongTensor(src),
-                       torch.LongTensor(src_length),
-                       torch.LongTensor(trg) if trg else None,
-                       torch.LongTensor(trg_length) if trg_length else None,
-                       pad_index, device)
+    return Batch(torch.LongTensor(src),
+                 torch.LongTensor(src_length),
+                 torch.LongTensor(trg) if trg else None,
+                 torch.LongTensor(trg_length) if trg_length else None,
+                 pad_index, device)
 
 
-def make_data_iter(dataset: Dataset,
+def make_data_iter(dataset: TranslationDataset,
                    batch_size: int,
                    batch_type: str = "sentence",
-                   batch_class: Batch = Batch,
                    seed: int = 42,
                    shuffle: bool = False,
                    num_workers: int = 0,
@@ -265,7 +284,6 @@ def make_data_iter(dataset: Dataset,
     :param dataset: torch dataset containing src and optionally trg
     :param batch_size: size of the batches the iterator prepares
     :param batch_type: measure batch size by sentence count or by token count
-    :param batch_class:
     :param seed: random seed for shuffling
     :param shuffle: whether to shuffle the data before each epoch
         (no effect if set to True for testing)
@@ -275,6 +293,7 @@ def make_data_iter(dataset: Dataset,
     :return: torch DataLoader
     """
     # sampler
+    sampler: Sampler[int]   # (type annotation)
     if shuffle:
         generator = torch.Generator()
         generator.manual_seed(seed)
@@ -301,7 +320,6 @@ def make_data_iter(dataset: Dataset,
                       collate_fn=partial(collate_fn,
                                          src_process=dataset.src_padding,
                                          trg_process=dataset.trg_padding,
-                                         batch_class=batch_class,
                                          pad_index=pad_index,
                                          device=device),
                       num_workers=num_workers)
@@ -316,8 +334,8 @@ class TranslationDataset(Dataset):
     :param src_padding: padding function for src
     :param trg_padding: padding function for trg
     """
-    def __init__(self, src: List[List[str]], trg: List[List[str]]=None,
-                 src_padding: Callable=None, trg_padding: Callable=None):
+    def __init__(self, src: List[List[str]], trg: List[List[str]] = None,
+                 src_padding: Callable = None, trg_padding: Callable = None):
         if isinstance(trg, list) and len(trg) == 0:
             trg = None
         if trg is not None:
@@ -336,12 +354,12 @@ class TranslationDataset(Dataset):
         :param idx:
         :return: length
         """
-        length = len(self.src[idx]) + 2 # +2 because of EOS_TOKEN and BOS_TOKEN
+        length = len(self.src[idx]) + 2  # +2 because of EOS_TOKEN and BOS_TOKEN
         if self.trg:
             length = max(length, len(self.trg[idx]) + 2)
         return length
 
-    def __getitem__(self, idx: int) -> Tuple[List[str], List[str]]:
+    def __getitem__(self, idx: int) -> Tuple[List[str], Optional[List[str]]]:
         """
         raise a raw instance
         :param idx: index
@@ -351,12 +369,13 @@ class TranslationDataset(Dataset):
         trg = self.trg[idx] if self.trg else None
         return src, trg
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.src)
 
-    def __repr__(self):
-        return "%s(len(src)=%s, len(trg)=%s)" % (self.__class__.__name__,
-            len(self.src), len(self.trg) if self.trg else 0)
+    def __repr__(self) -> str:
+        return "%s(len(src)=%s, len(trg)=%s)" % (
+            self.__class__.__name__, len(self.src),
+            len(self.trg) if self.trg else 0)
 
 
 class TokenBatchSampler(BatchSampler):

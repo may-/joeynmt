@@ -1,7 +1,8 @@
+from test.unit.test_helpers import TensorTestCase
+
 import torch
 
 from joeynmt.encoders import TransformerEncoder
-from .test_helpers import TensorTestCase
 
 
 class TestTransformerEncoder(TensorTestCase):
@@ -18,7 +19,7 @@ class TestTransformerEncoder(TensorTestCase):
 
     def test_transformer_encoder_freeze(self):
         encoder = TransformerEncoder(freeze=True)
-        for n, p in encoder.named_parameters():
+        for _, p in encoder.named_parameters():
             self.assertFalse(p.requires_grad)
 
     def test_transformer_encoder_forward(self):

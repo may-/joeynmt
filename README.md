@@ -21,7 +21,7 @@ However, Joey NMT re-implements baselines from major publications.
 Check out the detailed [documentation](https://joeynmt.readthedocs.io) and our [paper](https://arxiv.org/abs/1907.12484).
 
 ## Contributors
-Joey NMT was initially developed and is maintained by [Jasmijn Bastings](https://github.com/bastings) (University of Amsterdam) and [Julia Kreutzer](https://juliakreutzer.github.io/) (Heidelberg University), now both at Google Research. 
+Joey NMT was initially developed and is maintained by [Jasmijn Bastings](https://github.com/bastings) (University of Amsterdam) and [Julia Kreutzer](https://juliakreutzer.github.io/) (Heidelberg University), now both at Google Research. [Mayumi Ohta](https://www.cl.uni-heidelberg.de/statnlpgroup/members/ohta/) at Heidelberg University is continuing the legacy.
 
 ### Hall of Fame
 Welcome to our new contributors :hearts:, please don't hesitate to open a PR or an issue if there's something that needs improvement!
@@ -54,7 +54,7 @@ Joey NMT is built on [PyTorch](https://pytorch.org/) and [torchtext](https://git
 A. [*Now also directly with pip!*](https://pypi.org/project/joeynmt/)
   `pip install joeynmt`
   
-  If you want to use GPUs add: `pip install torch==1.7.1+cu101 -f https://download.pytorch.org/whl/torch_stable.html`, for CUDA v10.1.
+  If you want to use GPUs add: `pip install torch==1.8.0+cu101 -f https://download.pytorch.org/whl/torch_stable.html`, for CUDA v10.1.
   You'll need this in particular when working on Google Colab.
   
 B. From source
@@ -66,7 +66,7 @@ B. From source
   3. Run the unit tests:
   `python3 -m unittest`
 
-**Warning!** When running on *GPU* you need to manually install the suitable PyTorch version (1.7.1) for your [CUDA](https://developer.nvidia.com/cuda-zone) version. This is described in the [PyTorch installation instructions](https://pytorch.org/get-started/locally/).
+**Warning!** When running on *GPU* you need to manually install the suitable PyTorch version (1.8.0) for your [CUDA](https://developer.nvidia.com/cuda-zone) version. This is described in the [PyTorch installation instructions](https://pytorch.org/get-started/locally/).
 
 
 ## Usage
@@ -217,6 +217,7 @@ Code extending the functionalities beyond the basics will most likely not end up
 ## Projects and Extensions
 Here we'll collect projects and repositories that are based on Joey NMT, so you can find inspiration and examples on how to modify and extend the code.
 
+- :muscle: **Reinforcement Learning**. [@samuki](https://github.com/samuki/) implemented various policy gradient variants in Joey NMT: here's the [code](https://github.com/samuki/reinforce-joey), could the logo be any more perfect? :muscle: :koala:
 - :hand: **Sign Language Translation**. [@neccam](https://github.com/neccam/) built a sign language translator that continuosly recognizes sign language and translates it. Check out the [code](https://github.com/neccam/slt) and the [CVPR 2020 paper](https://openaccess.thecvf.com/content_CVPR_2020/html/Camgoz_Sign_Language_Transformers_Joint_End-to-End_Sign_Language_Recognition_and_Translation_CVPR_2020_paper.html)!
 - :abc: [@bpopeters](https://github.com/bpopeters/) built [Possum-NMT](https://github.com/deep-spin/sigmorphon-seq2seq) for multilingual grapheme-to-phoneme transduction and morphologic inflection. Read their [paper](https://www.aclweb.org/anthology/2020.sigmorphon-1.4.pdf) for SIGMORPHON 2020!
 - :camera: **Image Captioning**. [@pperle](https://github.com/pperle) and [@stdhd](https://github.com/stdhd) built an imagine captioning tool on top of Joey NMT, check out the [code](https://github.com/stdhd/image_captioning) and the [demo](https://image2caption.pascalperle.de/)!

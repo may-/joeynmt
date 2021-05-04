@@ -18,7 +18,7 @@ import torch
 from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 
-from torchtext.data import Dataset
+from torchtext.legacy.data import Dataset
 
 from joeynmt.constants import UNK_TOKEN
 from joeynmt.model import build_model
@@ -970,11 +970,12 @@ class TrainManager:
             return is_better
 
 
-def train(cfg_file: str) -> None:
+def train(cfg_file: str, skip_test: bool = False) -> None:
     """
     Main training function. After training, also test on test data if given.
 
     :param cfg_file: path to configuration yaml file
+    :param skip_test: whether a test should be run or not after training
     """
     # read config file
     cfg = load_config(Path(cfg_file))
@@ -1015,19 +1016,22 @@ def train(cfg_file: str) -> None:
     # train the model
     trainer.train_and_validate(train_data=train_data, valid_data=dev_data)
 
-    # predict with the best model on validation and test
-    # (if test data is available)
-    output_path = model_dir / "{:08d}.hyps".format(trainer.stats.best_ckpt_iter)
-    datasets_to_test = {
-        "dev": dev_data,
-        "test": test_data,
-        "src_vocab": src_vocab,
-        "trg_vocab": trg_vocab
-    }
-    test(cfg_file,
-         ckpt=(model_dir/ f"{trainer.stats.best_ckpt_iter}.ckpt").as_posix(),
-         output_path=output_path,
-         datasets=datasets_to_test)
+    if not skip_test:
+        # predict with the best model on validation and test
+        # (if test data is available)
+        output_path = model_dir / "{:08d}.hyps".format(trainer.stats.best_ckpt_iter)
+        datasets_to_test = {
+            "dev": dev_data,
+            "test": test_data,
+            "src_vocab": src_vocab,
+            "trg_vocab": trg_vocab
+        }
+        test(cfg_file,
+             ckpt=(model_dir/ f"{trainer.stats.best_ckpt_iter}.ckpt").as_posix(),
+             output_path=output_path,
+             datasets=datasets_to_test)
+    else:
+        logger.info("Skipping test after training")
 
 
 if __name__ == "__main__":

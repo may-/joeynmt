@@ -1,7 +1,7 @@
-import torch
 import random
+import torch
 
-from torchtext.data.batch import Batch as TorchTBatch
+from torchtext.legacy.data.batch import Batch as TorchTBatch
 
 from joeynmt.batch import Batch, SpeechBatch
 from joeynmt.data import load_data, make_data_iter
@@ -132,6 +132,7 @@ class TestData(TensorTestCase):
                 self.assertTensorEqual(b.trg_length, expected_trg0_len)
             total_samples += b.nseqs
             self.assertLessEqual(b.nseqs, batch_size)
+
         self.assertEqual(total_samples, len(self.dev_data))
 
 """
@@ -204,4 +205,3 @@ class TestSpeechData(TensorTestCase):
             self.assertLessEqual(b.nseqs, batch_size)
         self.assertEqual(total_samples, len(self.train_data))
 """
-

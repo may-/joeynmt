@@ -2,7 +2,6 @@
 """
 Data Augmentation
 """
-import os
 import math
 import random
 import string
@@ -82,6 +81,36 @@ class SpecAugment:
                 + f"time_mask_t={self.time_mask_t}, "
                 + f"time_mask_p={self.time_mask_p})")
 
+# from fairseq
+class CMVN:
+    """
+    CMVN: Cepstral Mean and Variance Normalization
+    (Utterance-level)
+    """
+
+    def __init__(self, norm_means: bool = True, norm_vars: bool = True):
+        self.norm_means = norm_means
+        self.norm_vars = norm_vars
+
+    def __call__(self, x: np.ndarray) -> np.ndarray:
+        orig_shape = x.shape
+        mean = x.mean(axis=0)
+        square_sums = (x ** 2).sum(axis=0)
+
+        if self.norm_means:
+            x = np.subtract(x, mean)
+        if self.norm_vars:
+            var = square_sums / x.shape[0] - mean ** 2
+            std = np.sqrt(np.maximum(var, 1e-10))
+            x = np.divide(x, std)
+
+        assert orig_shape == x.shape
+        return x
+
+    def __repr__(self):
+        return (self.__class__.__name__ +
+                f"(norm_means={self.norm_means}, norm_vars={self.norm_vars})")
+
 
 class Sampler(object):
     def __init__(self, sampler_cfg, unk_token):
@@ -97,32 +126,39 @@ class Sampler(object):
         assert 0.0 <= self.sample_ratio <= 1.0
         self.sample_max_len = sampler_cfg.get('sample_max_len', 10)
         self.min_trg_len = sampler_cfg.get('min_trg_len', 10)
-        self.token_sample_prob = sampler_cfg.get('token_sample_prob', 0.5) # coin flip
+        self.token_sample_prob = sampler_cfg.get('token_sample_prob', 0.5)
         assert 0.0 <= self.token_sample_prob <= 1.0
-        self.instance_sample_prob = sampler_cfg.get('instance_sample_prob', 0.5) # coin flip
+        self.instance_sample_prob = sampler_cfg.get('instance_sample_prob', 0.5)
         assert 0.0 <= self.instance_sample_prob <= 1.0
         self.freq_dict = pd.read_csv(sampler_cfg["freq_dict_file"],
             sep='\t', index_col=0, keep_default_na=False) \
             if self.sample_type == 'least-freq' else None
 
         # don't chose words in this list, i.e. punctuations
-        self.stop_words = list(string.punctuation) #'!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~'
+        #'!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~'
+        self.stop_words = list(string.punctuation)
         self.unk_token = unk_token
 
     def _lookup_freq(self, token):
-        if token == self.unk_token:
-            return -1
-        elif token not in self.freq_dict.index:
-            return 0
-        return self.freq_dict.loc[token].freq
+        if self.freq_dict is not None: #self.sample_type == 'least-freq':
+            if token == self.unk_token:
+                return -1
+            elif token not in self.freq_dict.index:
+                return 0
+            return self.freq_dict.loc[token].freq
+        else:
+            return None
 
-    def _sample_positions(self, trg: List[str], start: int = -np.inf, end: int = np.inf) -> Dict[int, str]:
+    def _sample_positions(self,
+                          trg: List[str],
+                          start: int = -np.inf,
+                          end: int = np.inf) -> Dict[int, str]:
         """
         sample mask positions
         :param trg: word-tokenized transcription (not bpe!)
         :param start: restrict mask positions between start and end
         :param end:
-        :return: dictionary {i: new_word} => i-th word in trg will be replaced by new_word
+        :return: dict {i: new_word} => i-th word will be replaced by new_word
         """
         trg_len = (end - start) if not np.isinf(start) and not np.isinf(end) else len(trg)
         # if trg seq is too short, then do nothing
@@ -134,7 +170,8 @@ class Sampler(object):
             return {}
 
         # number of positions to mask
-        num_masks = int(min(self.sample_max_len,  np.ceil(trg_len * self.sample_ratio)))
+        num_masks = int(min(self.sample_max_len,
+                            np.ceil(trg_len * self.sample_ratio)))
 
         # exclude stop words
         candidates = [(i, w, self._lookup_freq(w)) for i, w in enumerate(trg)
@@ -153,13 +190,13 @@ class Sampler(object):
 
         return dict(positions)
 
-    def __call__(self, textgrids: List[List[List]], word_cutoff:Tuple[List, List] = None) \
-            -> List[Dict[int, str]]:
+    def __call__(self, textgrids: List[List[List]],
+                 word_cutoff:Tuple[List, List] = None) -> List[Dict[int, str]]:
         """
         sample mask positions (word-level tokenization)
         :param textgrids:
         :param word_cutoff:
-        :return: list of dictionary {i: new_word} => i-th word in trg will be replaced by new_word
+        :return: list of dict {i: new_word} => i-th word will be replaced by new_word
         """
         batch_positions = []
         word_start, word_end = (None, None) if word_cutoff is None else word_cutoff
@@ -171,6 +208,8 @@ class Sampler(object):
         return batch_positions
 
     def __repr__(self):
+        freq_dict_str = "freq_dict=None" if self.freq_dict is None \
+            else f"len(freq_dict)={len(self.freq_dict)}"
         return (self.__class__.__name__
                 + "(" + ", ".join([
                     f"sample_type='{self.sample_type}'",
@@ -179,17 +218,20 @@ class Sampler(object):
                     f"min_trg_len={self.min_trg_len}",
                     f"token_sample_prob={self.token_sample_prob}",
                     f"instance_sample_prob={self.instance_sample_prob}",
-                    f"len(freq_dict)={len(self.freq_dict)}",
+                    freq_dict_str,
                     f"len(stop_words)={len(self.stop_words)}"])
                 + ")")
 
 
 class AlignedMasking(object):
-    def __call__(self, x: np.ndarray, positions: Dict[int, str], textgrids: List[List],
+    def __call__(self, x: np.ndarray,
+                 positions: Dict[int, str],
+                 textgrids: List[List],
                  word_cutoff: Tuple[int, int] = None) -> np.ndarray:
         """
         AlignedMasking
-        :param x: (np.ndarray) spectrogram features, shape of (num_frames, num_freq)
+        :param x: (np.ndarray) spectrogram features,
+                    shape of (num_frames, num_freq)
         :param positions: (Dict[int, str])
         :param textgrids: (List[List])
         :param word_cutoff: (tuple(int, int))
@@ -264,10 +306,11 @@ class AudioDictAugment(object):
         assert self.lookup in {'word', 'phoneme'}
 
         # construct audio dict dataframe
-        audio_dict_file = os.path.expanduser(audio_dict_cfg['audio_dict_file'])
-        self.audio_dict_root, _ = os.path.split(audio_dict_file)    # assume audio_dict.zip locates there
+        audio_dict_file = Path(audio_dict_cfg['audio_dict_file']).expanduser()
+        #self.audio_dict_root, _ = os.path.split(audio_dict_file)    # assume audio_dict.zip locates there
+        self.audio_dict_root = audio_dict_file.parent
         self.audio_dict_df = pd.read_csv(                           # load tsv file
-            audio_dict_file, sep='\t', index_col=0, keep_default_na=False)
+            audio_dict_file.as_posix(), sep='\t', index_col=0, keep_default_na=False)
         #     total 9,406,611 entries in this dict]
 
         # list of splits you want to use. comma separated
@@ -295,12 +338,14 @@ class AudioDictAugment(object):
         self.seg_count = 0
         self.sent_count = 0
 
-    def __call__(self, x: np.ndarray, positions: Dict[int, str],
-                 textgrids: List[List], word_cutoff: Tuple[int, int] = None) \
-            -> List[Dict[int, str]]:
+    def __call__(self, x: np.ndarray,
+                 positions: Dict[int, str],
+                 textgrids: List[List],
+                 word_cutoff: Tuple[int, int] = None) -> List[Dict[int, str]]:
         """
         AudioDictSampling
-        :param x: (np.ndarray) spectrogram features, shape of (num_frames, num_freq)
+        :param x: (np.ndarray) spectrogram features,
+                    shape of (num_frames, num_freq)
         :param positions: (Dict[int, str])
         :param textgrids: (List[List])
         :param word_cutoff: (tuple(int, int))
@@ -345,7 +390,8 @@ class AudioDictAugment(object):
                 edit_flag = True # enter in edit mode
 
             if edit_flag:
-                surface = bpe_postprocess(positions[pos].replace(' ', '▁'), bpe_type=self.bpe_type)
+                surface = bpe_postprocess(positions[pos].replace(' ', '▁'),
+                                          bpe_type=self.bpe_type)
                 words = surface.split() # 'surface' can consist of multiple words!
                 l = 0
                 hit_flag = True
@@ -359,7 +405,7 @@ class AudioDictAugment(object):
                         break
                     else:   # if found:
                         sampled = filtered.sample(n=1).iloc[0]  # sample one entry from dict
-                        f = get_features(os.path.join(self.audio_dict_root, sampled.audio))
+                        f = get_features(self.audio_dict_root/sampled.audio)
                         f = f[sampled.start:sampled.end, :]
                         assert f.shape[0] == (sampled.n_frames - 1)
                         hit_count += 1
@@ -437,7 +483,8 @@ class MaskedLMAugment(object):
             # currently roberta only
             assert self.model_name.rsplit('/', 1)[-1] in {'roberta.base', 'roberta.large'}
             #roberta = torch.hub.load('pytorch/fairseq', self.model_name)
-            self.roberta = RobertaModel.from_pretrained(self.model_name, checkpoint_file='model.pt')
+            self.roberta = RobertaModel.from_pretrained(
+                self.model_name, checkpoint_file='model.pt')
             self.roberta.model.eval()
             self.roberta.model.to(device)
             self.max_length = 512
@@ -472,17 +519,20 @@ class MaskedLMAugment(object):
 
         self.stop_token_list = []
         stop_token_file = mlm_cfg.get('stop_token_file', None)
-        if stop_token_file and os.path.exists(stop_token_file):
-            try:
-                import json
-                with open(stop_token_file, 'r') as f:
-                    stop = json.load(f)
-                stop_tokens = ' '.join([str(t) for t in stop.values()]
-                    + [self.bos_token, self.eos_token, self.mask_token, self.pad_token, self.unk_token])
-                self.stop_token_list = self.roberta.task.source_dictionary.encode_line(
-                    stop_tokens, append_eos=False).tolist()
-            except:
-                raise ImportError
+        if stop_token_file:
+            stop_token_file = Path(stop_token_file)
+            if stop_token_file.is_file():
+                try:
+                    import json
+                    with open(stop_token_file, 'r') as f:
+                        stop = json.load(f)
+                    stop_tokens = ' '.join([str(t) for t in stop.values()]
+                        + [self.bos_token, self.eos_token, self.mask_token,
+                           self.pad_token, self.unk_token])
+                    self.stop_token_list = self.roberta.task.source_dictionary.encode_line(
+                        stop_tokens, append_eos=False).tolist()
+                except:
+                    raise ImportError
 
     def _mask(self, trg, positions):
         tmp = []
@@ -507,11 +557,15 @@ class MaskedLMAugment(object):
         )
         return tokens
 
-    def __call__(self, batch_positions, batch_textgrids, steps=0) -> List[Dict[int, str]]:
+    def __call__(self,
+                 batch_positions: List[Dict[int, str]],
+                 batch_textgrids: List[List[List]],
+                 steps: int=0) -> List[Dict[int, str]]:
         """
         language model inference in batch level
         :param batch_positions:
         :param batch_textgrids:
+        :param steps: (for logging)
         :return:
         """
         if sum([1 if len(p) > 0 else 0 for p in batch_positions]) == 0:
@@ -558,11 +612,11 @@ class MaskedLMAugment(object):
                 )
             except Exception as e:
                 logger.debug(f"Error at {steps}: {e}")
-                #if steps > 0:
-                #    obj = {"input_ids": input_ids,
-                #           "positions": batch_positions,
-                #           "textgrids": batch_textgrids}
-                #    torch.save(obj, os.path.join("/scratch5t/ohta/output/tmp2", f"error_{steps}.pt"))
+                if steps > 0:
+                    obj = {"input_ids": input_ids,
+                           "positions": batch_positions,
+                           "textgrids": batch_textgrids}
+                    torch.save(obj, Path("/scratch5t/ohta/output/tmp2", f"error_{steps}.pt").as_posix())
                 return batch_positions
 
         f = features.detach().clone().cpu()
@@ -667,7 +721,8 @@ class SubSequencer(object):
         coin_flip = np.random.binomial(1, self.instance_sample_prob, batch_size)
         for i in range(batch_size):
             l_orig = len(word2bpe[i]) # original length (num of words)
-            l_aug = min(max(int(np.ceil(length[i])), self.min_word_length), self.max_word_length)
+            l_aug = min(max(int(np.ceil(length[i])), self.min_word_length),
+                        self.max_word_length)
             assert self.min_word_length <= l_aug <= self.max_word_length
             # length sampled from the distribution
 
@@ -684,7 +739,7 @@ class SubSequencer(object):
             if l_aug > l_orig:
                 flag = False
 
-            if flag is True: # if sampled length is longer than the original, cut the seq off
+            if flag is True:
                 if l_orig == l_aug:
                     l_aug -= 1 # need at least 1 diff
                 assert l_orig > l_aug
@@ -693,7 +748,8 @@ class SubSequencer(object):
                     word_start.append(0)
                     word_end.append(l_aug)
                 elif cutoff == 1: # 1 -> [j:j+l]
-                    j = np.random.randint(0, l_orig - l_aug) # start position sampled uniformly
+                    # start position sampled uniformly
+                    j = np.random.randint(0, l_orig - l_aug)
                     word_start.append(j)
                     word_end.append(j + l_aug)
                 elif cutoff == 2: # 2 -> [-l:]

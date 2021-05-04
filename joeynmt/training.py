@@ -8,11 +8,10 @@ import time
 import shutil
 from typing import List
 import logging
-import os
+from pathlib import Path
 import sys
-import collections
-from collections import defaultdict
-import pathlib
+from collections import deque, defaultdict
+import heapq
 import numpy as np
 
 import torch
@@ -27,8 +26,8 @@ from joeynmt.batch import Batch, SpeechBatch
 from joeynmt.helpers import load_config, log_cfg, \
     store_attention_plots, load_checkpoint, make_model_dir, \
     make_logger, set_seed, symlink_update, delete_ckpt, \
-    latest_checkpoint_update, ConfigurationError
-from joeynmt.data_augmentation import Sampler, SpecAugment, \
+    ConfigurationError #latest_checkpoint_update,
+from joeynmt.data_augmentation import Sampler, SpecAugment, CMVN, \
     AlignedMasking, AudioDictAugment, MaskedLMAugment, SubSequencer
 from joeynmt.model import Model, _DataParallel
 from joeynmt.prediction import validate_on_data
@@ -64,30 +63,33 @@ class TrainManager:
         :param config: dictionary containing the training configurations
         :param batch_class: batch class to encapsulate the torch class
         """
-        train_config = config["training"]
-        self.task = config["data"].get("task", "MT")
+        train_cfg = config["training"]
+        data_cfg = config["data"]
+        test_cfg = config["testing"]
+
+        self.task = data_cfg.get("task", "MT")
         if self.task not in {"MT", "s2t"}:
             raise ConfigurationError("Invalid setting for `task`. "
                                      "Valid options: 'MT', 's2t'.")
         self.batch_class = batch_class
 
         # files for logging and storing
-        self.model_dir = train_config["model_dir"]
-        assert os.path.exists(self.model_dir)
+        self.model_dir = Path(train_cfg["model_dir"])
+        assert self.model_dir.is_dir()
 
-        self.logging_freq = train_config.get("logging_freq", 100)
-        self.valid_report_file = os.path.join(self.model_dir, "validations.txt")
+        self.logging_freq = train_cfg.get("logging_freq", 100)
+        self.valid_report_file = self.model_dir / "validations.txt"
         self.tb_writer = SummaryWriter(
-            log_dir=os.path.join(self.model_dir, "tensorboard"))
+            log_dir=(self.model_dir / "tensorboard").as_posix())
 
         # model
         self.model = model
         self.model.log_parameters_list()
 
         # objective
-        label_smoothing = train_config.get("label_smoothing", 0.0)
-        if train_config.get("loss", "crossentropy") == "crossentropy-ctc":
-            ctc_weight = train_config.get("ctc_weight", 0.3)
+        label_smoothing = train_cfg.get("label_smoothing", 0.0)
+        if train_cfg.get("loss", "crossentropy") == "crossentropy-ctc":
+            ctc_weight = train_cfg.get("ctc_weight", 0.3)
             loss_function = XentCTCLoss(pad_index=self.model.pad_index,
                                         bos_index=self.model.bos_index,
                                         smoothing=label_smoothing,
@@ -100,136 +102,139 @@ class TrainManager:
             self.model.decoder.ctc_output_layer = None
         logger.info(self.model)
 
-        self.normalization = train_config.get("normalization", "batch")
+        self.normalization = train_cfg.get("normalization", "batch")
         if self.normalization not in ["batch", "tokens", "none"]:
-            raise ConfigurationError("Invalid normalization option."
-                                     "Valid options: "
-                                     "'batch', 'tokens', 'none'.")
+            raise ConfigurationError(
+                "Invalid normalization option. "
+                "Valid options: 'batch', 'tokens', 'none'.")
 
         # optimization
-        self.learning_rate_min = train_config.get("learning_rate_min", 1.0e-8)
+        self.learning_rate_min = train_cfg.get("learning_rate_min", 1.0e-8)
 
-        self.clip_grad_fun = build_gradient_clipper(config=train_config)
-        self.optimizer = build_optimizer(config=train_config,
+        self.clip_grad_fun = build_gradient_clipper(config=train_cfg)
+        self.optimizer = build_optimizer(config=train_cfg,
                                          parameters=model.parameters())
 
         # validation & early stopping
-        self.validation_freq = train_config.get("validation_freq", 1000)
-        self.log_valid_sents = train_config.get("print_valid_sents", [0, 1, 2])
-        self.save_latest_checkpoint = train_config.get("save_latest_ckpt", True)
-        maxlen = train_config.get("keep_last_ckpts", 5)
-        self.ckpt_queue = collections.deque(
-            maxlen=maxlen if maxlen > 0 else None)
-        metrics = train_config.get("eval_metrics", "").split(",")
+        self.validation_freq = train_cfg.get("validation_freq", 1000)
+        self.log_valid_sents = train_cfg.get("print_valid_sents", [0, 1, 2])
+        #self.save_latest_checkpoint = train_cfg.get("save_latest_ckpt", True)
+        #maxlen = train_cfg.get("keep_last_ckpts", 5)
+        #self.ckpt_queue = deque(maxlen=maxlen if maxlen > 0 else None)
+        metrics = train_cfg.get("eval_metrics", "").split(",")
         self.eval_metrics = [s.strip().lower() for s in metrics
                              if len(s.strip()) > 0]
         #backward compatibility
-        if len(self.eval_metrics) == 0 \
-                and "eval_metric" in train_config.keys():
-            self.eval_metrics = [train_config.get("eval_metric",
-                                                  "bleu").strip().lower()]
+        if len(self.eval_metrics) == 0 and "eval_metric" in train_cfg.keys():
+            self.eval_metrics = [train_cfg.get("eval_metric",
+                                               "bleu").strip().lower()]
         assert len(self.eval_metrics) > 0
         for eval_metric in self.eval_metrics:
             if eval_metric not in ['bleu', 'chrf', 'token_accuracy',
                                    'sequence_accuracy', 'wer']:
-                raise ConfigurationError("Invalid setting for 'eval_metric', "
-                                         "valid options: 'bleu', 'chrf', "
-                                         "'token_accuracy', "
-                                         "'sequence_accuracy', 'wer'.")
-        self.early_stopping_metric = train_config.get("early_stopping_metric",
-                                                      "eval_metric")
-
+                raise ConfigurationError(
+                    "Invalid setting for 'eval_metric', Valid options: 'bleu', "
+                    "'chrf', 'token_accuracy', 'sequence_accuracy', 'wer'.")
+        self.early_stopping_metric = train_cfg.get("early_stopping_metric",
+                                                   "eval_metric")
+        if self.early_stopping_metric not in ['loss', 'ppl', 'acc',
+                                              'eval_metric']:
+            raise ConfigurationError(
+                "Invalid setting for 'early_stopping_metric', "
+                "Valid options: 'loss', 'ppl', 'acc', 'eval_metric'.")
+        self.early_stopping_metric_name = self.eval_metrics[0] \
+            if self.early_stopping_metric == "eval_metric" \
+            else self.early_stopping_metric
         # early_stopping_metric decides on how to find the early stopping point:
         # ckpts are written when there's a new high/low score for this metric.
         # If we schedule after BLEU/chrf/accuracy, we want to maximize the
         # score, else we want to minimize it.
-        if self.early_stopping_metric in ["ppl", "loss"]:
+        if self.early_stopping_metric_name in ["ppl", "loss", "wer"]:
             self.minimize_metric = True
-        elif self.early_stopping_metric in ["acc"]:
+        elif self.early_stopping_metric_name in [
+            "acc", "bleu", "chrf", "token_accuracy", "sequence_accuracy"]:
             self.minimize_metric = False
-        elif self.early_stopping_metric == "eval_metric":
-            if self.eval_metrics[0] in [
-                    "bleu", "chrf", "token_accuracy", "sequence_accuracy"
-            ]:
-                self.minimize_metric = False
-            # eval metric that has to get minimized: wer
-            else:
-                self.minimize_metric = True
-        else:
-            raise ConfigurationError(
-                "Invalid setting for 'early_stopping_metric', "
-                "valid options: 'loss', 'ppl', 'acc', 'eval_metric'.")
+
+        # save/delete checkpoints
+        self.num_ckpts = train_cfg.get("num_ckpts", 5)
+        self.keep_ckpts = train_cfg.get("keep_ckpts", "last")
+        if self.keep_ckpts not in ["best", "last"]:
+            raise ConfigurationError("Invalid setting for 'keep_ckpts', "
+                                     "valid options: 'best', 'last'.")
+        self.ckpt_queue = []
+        #heapq._heapify_max([]) \   # max heap queue
+        #if self.keep_ckpts == "best" and self.minimize_metric \
+        #else heapq.heapify([])     # min heap queue
+
+        keep_latest_ckpts = train_cfg.get("keep_latest_ckpts", None)
+        if keep_latest_ckpts is not None: # backward compatibility
+            self.num_ckpts = keep_latest_ckpts
+            logger.warning("`keep_latest_ckpts` option is outdated. "
+                           "Please use `num_ckpts` and `keep_ckpts`, instead.")
 
         # eval options
-        self.level = config["data"]["level"]
+        self.level = data_cfg["level"]
         if self.level not in ["word", "bpe", "char"]:
             raise ConfigurationError("Invalid segmentation level. "
                                      "Valid options: 'word', 'bpe', 'char'.")
-        test_config = config["testing"]
-        self.bpe_type = test_config.get("bpe_type", "subword-nmt")
+        self.bpe_type = test_cfg.get("bpe_type", "subword-nmt")
         if self.bpe_type not in ["subword-nmt", "sentencepiece"]:
             raise ConfigurationError("Invalid bpe type. Valid options: "
                                      "'subword-nmt', 'sentencepiece'.")
-        self.level = config["data"]["level"]
-        if self.level not in ["word", "bpe", "char"]:
-            raise ConfigurationError("Invalid segmentation level. "
-                                     "Valid options: 'word', 'bpe', 'char'.")
         self.sacrebleu = {
             "remove_whitespace": True,
             "remove_punctuation": True,
             "tokenize": "13a",
-            "tok_fun": lambda s: list(s) if self.level=="char" else s.split()}
-        if "sacrebleu" in config["testing"].keys():
-            self.sacrebleu["remove_whitespace"] = test_config["sacrebleu"] \
+            "tok_fun": lambda s: list(s) if self.level == "char" else s.split()}
+        if "sacrebleu" in test_cfg.keys():
+            self.sacrebleu["remove_whitespace"] = test_cfg["sacrebleu"] \
                 .get("remove_whitespace", True)
-            self.sacrebleu["remove_punctuation"] = test_config["sacrebleu"] \
+            self.sacrebleu["remove_punctuation"] = test_cfg["sacrebleu"] \
                 .get("remove_punctuation", True)
-            self.sacrebleu["tokenize"] = test_config["sacrebleu"] \
+            self.sacrebleu["tokenize"] = test_cfg["sacrebleu"] \
                 .get("tokenize", "13a")
         if "wer" in self.eval_metrics:
             eval_tokenizer = EvaluationTokenizer(
                 tokenize=self.sacrebleu["tokenize"],
-                lowercase=config["data"].get("lowercase", False),
+                lowercase=data_cfg.get("lowercase", False),
                 remove_punctuation=self.sacrebleu["tokenize"],
                 level=self.level)
             self.sacrebleu["tok_fun"] = eval_tokenizer.tokenize
 
         # learning rate scheduling
         self.scheduler, self.scheduler_step_at = build_scheduler(
-            config=train_config,
+            config=train_cfg,
             scheduler_mode="min" if self.minimize_metric else "max",
             optimizer=self.optimizer,
             hidden_size=config["model"]["encoder"]["hidden_size"])
 
         # data & batch handling
-        self.shuffle = train_config.get("shuffle", True)
-        self.epochs = train_config["epochs"]
-        self.max_updates = train_config.get("updates", np.inf)
-        self.batch_size = train_config["batch_size"]
+        self.shuffle = train_cfg.get("shuffle", True)
+        self.epochs = train_cfg["epochs"]
+        self.max_updates = train_cfg.get("updates", np.inf)
+        self.batch_size = train_cfg["batch_size"]
         # Placeholder so that we can use the train_iter in other functions.
         self.train_iter, self.train_iter_state = None, None
         # per-device batch_size = self.batch_size // self.n_gpu
-        self.batch_type = train_config.get("batch_type", "sentence")
-        self.eval_batch_size = train_config.get("eval_batch_size",
-                                                self.batch_size)
+        self.batch_type = train_cfg.get("batch_type", "sentence")
+        self.eval_batch_size = train_cfg.get("eval_batch_size", self.batch_size)
         # per-device eval_batch_size = self.eval_batch_size // self.n_gpu
-        self.eval_batch_type = train_config.get("eval_batch_type",
-                                                self.batch_type)
+        self.eval_batch_type = train_cfg.get("eval_batch_type", self.batch_type)
         # gradient accumulation
-        self.batch_multiplier = train_config.get("batch_multiplier", 1)
+        self.batch_multiplier = train_cfg.get("batch_multiplier", 1)
 
         # generation
-        self.max_output_length = train_config.get("max_output_length", None)
+        self.max_output_length = train_cfg.get("max_output_length", None)
 
         # CPU / GPU
-        self.use_cuda = train_config["use_cuda"] and torch.cuda.is_available()
+        self.use_cuda = train_cfg["use_cuda"] and torch.cuda.is_available()
         self.n_gpu = torch.cuda.device_count() if self.use_cuda else 0
         self.device = torch.device("cuda" if self.use_cuda else "cpu")
         if self.use_cuda:
             self.model.to(self.device)
 
         # fp16
-        self.fp16 = train_config.get("fp16", False)
+        self.fp16 = train_cfg.get("fp16", False)
         if self.fp16:
             if 'apex' not in sys.modules:
                 raise ImportError("Please install apex from "
@@ -243,17 +248,24 @@ class TrainManager:
 
         # data augmentation
         if self.task == "s2t":
-            self.data_augmentation = config["data"].get("data_augmentation", "specaugment")
-            self.max_src_length = config["data"]["max_feat_length"]
-            self.max_trg_length = config["data"]["max_sent_length"]
+            self.data_augmentation = data_cfg.get("data_augmentation",
+                                                  "specaugment")
+            self.max_src_length = data_cfg["max_feat_length"]
+            self.max_trg_length = data_cfg["max_sent_length"]
             self.specaugment = None
-            if "specaugment" in config["data"].keys():
-                self.specaugment = SpecAugment(**config["data"]["specaugment"])
+            if "specaugment" in data_cfg.keys():
+                self.specaugment = SpecAugment(**data_cfg["specaugment"])
                 logger.info(self.specaugment)
 
+            self.cmvn = None
+            if "cmvn" in data_cfg.keys():
+                self.cmvn = CMVN(**data_cfg["cmvn"])
+                logger.info(self.cmvn)
+
             self.mask_sampler = None
-            if "sampler" in config["data"].keys():
-                self.mask_sampler = Sampler(config["data"]["sampler"], unk_token=UNK_TOKEN)
+            if "sampler" in data_cfg.keys():
+                self.mask_sampler = Sampler(data_cfg["sampler"],
+                                            unk_token=UNK_TOKEN)
                 logger.info(self.mask_sampler)
 
             self.aligned_masking = None
@@ -262,23 +274,29 @@ class TrainManager:
                 #logger.info(self.aligned_masking)
 
             self.audio_dict = None
-            if self.data_augmentation in ["audio_dict_replacement", "aligned_audio_dict"] \
-                    and "audio_dict" in config["data"].keys():
-                self.audio_dict = AudioDictAugment(config["data"]["audio_dict"])
+            if self.data_augmentation in ["audio_dict_replacement",
+                                          "aligned_audio_dict"] \
+                    and "audio_dict" in data_cfg.keys():
+                self.audio_dict = AudioDictAugment(data_cfg["audio_dict"])
                 logger.info(self.audio_dict)
 
             self.masked_lm = None
-            if self.data_augmentation in ["trg_replacement", "aligned_audio_dict"] \
-                    and "masked_language_model" in config["data"].keys():
-                self.masked_lm = MaskedLMAugment(config["data"]["masked_language_model"],
-                                                 config["data"]['lowercase'], self.model.trg_vocab.stoi,
-                                                 self.model.unk_index, self.model.bos_index,
-                                                 self.model.eos_index, self.device)
+            if self.data_augmentation in ["trg_replacement",
+                                          "aligned_audio_dict"] \
+                    and "masked_language_model" in data_cfg.keys():
+                self.masked_lm = MaskedLMAugment(
+                    data_cfg["masked_language_model"],
+                    data_cfg['lowercase'],
+                    self.model.trg_vocab.stoi,
+                    self.model.unk_index,
+                    self.model.bos_index,
+                    self.model.eos_index,
+                    self.device)
                 logger.info(self.masked_lm)
 
             self.subsequencer = None
-            if "subsequence" in config["data"].keys():
-                self.subsequencer = SubSequencer(**config["data"]["subsequence"])
+            if "subsequence" in data_cfg.keys():
+                self.subsequencer = SubSequencer(**data_cfg["subsequence"])
                 logger.info(self.subsequencer)
 
         # initialize training statistics
@@ -294,13 +312,13 @@ class TrainManager:
             minimize_metric=self.minimize_metric)
 
         # model parameters
-        if "load_model" in train_config.keys():
+        if "load_model" in train_cfg.keys():
             self.init_from_checkpoint(
-                train_config["load_model"],
-                reset_best_ckpt=train_config.get("reset_best_ckpt", False),
-                reset_scheduler=train_config.get("reset_scheduler", False),
-                reset_optimizer=train_config.get("reset_optimizer", False),
-                reset_iter_state=train_config.get("reset_iter_state", False))
+                Path(train_cfg["load_model"]).absolute(),
+                reset_best_ckpt=train_cfg.get("reset_best_ckpt", False),
+                reset_scheduler=train_cfg.get("reset_scheduler", False),
+                reset_optimizer=train_cfg.get("reset_optimizer", False),
+                reset_iter_state=train_cfg.get("reset_iter_state", False))
 
         # multi-gpu training (should be after apex fp16 initialization)
         if self.n_gpu > 1:
@@ -308,7 +326,7 @@ class TrainManager:
 
         ####### end __init__() #######
 
-    def _save_checkpoint(self, new_best: bool = True) -> None:
+    def _save_checkpoint(self, new_best: bool, score: float) -> None:
         """
         Save the model's current parameters and the training state to a
         checkpoint.
@@ -320,70 +338,69 @@ class TrainManager:
         :param new_best: This boolean signals which symlink we will use for the
           new checkpoint. If it is true, we update best.ckpt, else latest.ckpt.
         """
-        model_path = os.path.join(self.model_dir, f"{self.stats.steps}.ckpt")
+        model_path = self.model_dir / f"{self.stats.steps}.ckpt"
         logger.info("Saving new checkpoint: %s", model_path)
         model_state_dict = self.model.module.state_dict() \
             if isinstance(self.model, torch.nn.DataParallel) \
             else self.model.state_dict()
         state = {
-            "steps":
-            self.stats.steps,
-            "total_tokens":
-            self.stats.total_tokens,
-            "total_seqs":
-            self.stats.total_seqs,
-            "total_batches":
-            self.stats.total_batches,
-            "best_ckpt_score":
-            self.stats.best_ckpt_score,
-            "best_ckpt_iteration":
-            self.stats.best_ckpt_iter,
-            "model_state":
-            model_state_dict,
-            "optimizer_state":
-            self.optimizer.state_dict(),
-            "scheduler_state":
-            self.scheduler.state_dict() if self.scheduler is not None else None,
-            'amp_state':
-            amp.state_dict() if self.fp16 else None,
-            "train_iter_state":
-            self.train_iter.state_dict()
+            "steps": self.stats.steps,
+            "total_tokens": self.stats.total_tokens,
+            "total_seqs": self.stats.total_seqs,
+            "total_batches": self.stats.total_batches,
+            "best_ckpt_score": self.stats.best_ckpt_score,
+            "best_ckpt_iteration": self.stats.best_ckpt_iter,
+            "model_state": model_state_dict,
+            "optimizer_state": self.optimizer.state_dict(),
+            "scheduler_state": self.scheduler.state_dict() \
+                if self.scheduler is not None else None,
+            'amp_state': amp.state_dict() if self.fp16 else None,
+            "train_iter_state": self.train_iter.state_dict()
         }
         torch.save(state, model_path)
-        symlink_target = f"{self.stats.steps}.ckpt"
+
+        # update symlink
+        symlink_target = Path(f"{self.stats.steps}.ckpt")
+        # last symlink
+        last_path = self.model_dir / "latest.ckpt"
+        prev_path = symlink_update(symlink_target, last_path)
+        # best symlink
+        best_path = self.model_dir / "best.ckpt"
         if new_best:
-            if self.ckpt_queue.maxlen is not None \
-                    and len(self.ckpt_queue) == self.ckpt_queue.maxlen:
-                to_delete = self.ckpt_queue.popleft()  # delete oldest ckpt
-                logger.info(f"Deleting checkpoint: {to_delete}")
-                delete_ckpt(to_delete)
+            prev_path = symlink_update(symlink_target, best_path)
+            assert best_path.resolve().stem == str(self.stats.best_ckpt_iter)
 
-            self.ckpt_queue.append(model_path)
+        # push to and pop from the heap queue
+        if self.num_ckpts > 0:
+            to_delete = None
+            heap_key = score if self.keep_ckpts == "best" else self.stats.steps
+            if len(self.ckpt_queue) < self.num_ckpts: # no pop, push only
+                heapq.heappush(self.ckpt_queue, (heap_key, model_path))
+            else: # pop the oldest / worst one in the queue
+                if self.keep_ckpts == "best" and self.minimize_metric:
+                    # pylint: disable=protected-access
+                    to_delete = heapq._heappushpop_max(self.ckpt_queue,
+                                                       (heap_key, model_path))
+                    # pylint: enable=protected-access
+                else: #if self.keep_ckpts == "last" or
+                    # (self.keep_ckpts == "best" and not self.minimize_metric):
+                    to_delete = heapq.heappushpop(self.ckpt_queue,
+                                                  (heap_key, model_path))
+                assert to_delete[1] != model_path # don't delete the latest one
 
-            best_path = os.path.join(self.model_dir, "best.ckpt")
-            try:
-                # create/modify symbolic link for best checkpoint
-                symlink_update(symlink_target, best_path)
-            except OSError:
-                # overwrite best.ckpt
-                torch.save(state, best_path)
+            if to_delete is not None \
+                    and to_delete[1].stem != best_path.resolve().stem:
+                delete_ckpt(to_delete[1])         # don't delete the best one
 
-        if self.save_latest_checkpoint:
-            last_path = os.path.join(self.model_dir, "latest.ckpt")
-            previous_path = latest_checkpoint_update(symlink_target, last_path)
-            # If the last ckpt is in the ckpt_queue, we don't want to delete it.
-            if self.ckpt_queue.maxlen is not None:
-                can_delete = True
-                for ckpt_path in self.ckpt_queue:
-                    if pathlib.Path(ckpt_path).resolve() == previous_path:
-                        can_delete = False
-                        break
-                if can_delete and previous_path is not None:
-                    logger.info(f"Deleting checkpoint: {previous_path}")
-                    delete_ckpt(previous_path)
+            assert len(self.ckpt_queue) <= self.num_ckpts
+
+            # remove old symlink target if not in queue after push/pop
+            if prev_path is not None and \
+                    prev_path.stem not in [c[1].stem for c in self.ckpt_queue]:
+                delete_ckpt(prev_path)
 
     def init_from_checkpoint(self,
-                             path: str,
+                             path: Path,
                              reset_best_ckpt: bool = False,
                              reset_scheduler: bool = False,
                              reset_optimizer: bool = False,
@@ -406,7 +423,7 @@ class TrainManager:
                                 use the one stored in the checkpoint.
         """
         logger.info("Loading model from %s", path)
-        model_checkpoint = load_checkpoint(path=path, use_cuda=self.use_cuda)
+        model_checkpoint = load_checkpoint(path=path, device=self.device)
 
         # restore model and optimizer parameters
         self.model.load_state_dict(model_checkpoint["model_state"])
@@ -427,8 +444,10 @@ class TrainManager:
         # restore counts
         self.stats.steps = model_checkpoint["steps"]
         self.stats.total_tokens = model_checkpoint["total_tokens"]
-        self.stats.total_seqs = model_checkpoint["total_seqs"] if "total_seqs" in model_checkpoint.keys() else 0
-        self.stats.total_batches = model_checkpoint["total_batches"] if "total_batches" in model_checkpoint.keys() else 0
+        self.stats.total_seqs = model_checkpoint["total_seqs"] \
+            if "total_seqs" in model_checkpoint.keys() else 0
+        self.stats.total_batches = model_checkpoint["total_batches"] \
+            if "total_batches" in model_checkpoint.keys() else 0
 
         if not reset_best_ckpt:
             self.stats.best_ckpt_score = model_checkpoint["best_ckpt_score"]
@@ -500,8 +519,8 @@ class TrainManager:
             "\tgradient accumulation: %d\n"
             "\tbatch size per device: %d\n"
             "\ttotal batch size (w. parallel & accumulation): %d", self.device,
-            self.n_gpu, self.fp16, self.batch_multiplier, self.batch_size //
-            self.n_gpu if self.n_gpu > 1 else self.batch_size,
+            self.n_gpu, self.fp16, self.batch_multiplier,
+            self.batch_size//self.n_gpu if self.n_gpu > 1 else self.batch_size,
             self.batch_size * self.batch_multiplier)
 
         for epoch_no in range(self.epochs):
@@ -539,9 +558,12 @@ class TrainManager:
                     kwargs["aligned_masking"] = self.aligned_masking
                     kwargs["audio_dict"] = self.audio_dict
                     kwargs["masked_lm"] = self.masked_lm
-                batch = self.batch_class(batch, pad_index=self.model.pad_index,
-                    bos_index=self.model.bos_index, eos_index=self.model.eos_index,
-                    use_cuda=self.use_cuda, **kwargs)
+                batch = self.batch_class(batch,
+                                         pad_index=self.model.pad_index,
+                                         bos_index=self.model.bos_index,
+                                         eos_index=self.model.eos_index,
+                                         use_cuda=self.use_cuda,
+                                         **kwargs)
 
                 # get batch loss
                 loss_dict = self._train_step(batch)
@@ -615,15 +637,11 @@ class TrainManager:
                 if self.stats.is_min_lr or self.stats.is_max_update:
                     break
 
-            # pylint: disable=no-else-break
-            if self.stats.is_min_lr:
-                logger.info(
-                    'Training ended since minimum lr %f was reached.',
-                    self.learning_rate_min)
-                break
-            elif self.stats.is_max_update:
-                logger.info('Training ended since maximum num. of '
-                            'updates %d was reached.', self.max_updates)
+            if self.stats.is_min_lr or self.stats.is_max_update:
+                log_str = f"minimum lr {self.learning_rate_min}" \
+                    if self.stats.is_min_lr \
+                    else f"maximum num. of updates {self.max_updates}"
+                logger.info("Training ended since %s was reached.", log_str)
                 break
 
             logger.info('Epoch %3d: total training loss %.2f, num updates: %6d, '
@@ -638,12 +656,9 @@ class TrainManager:
                 self.audio_dict.reset_stats()
         else:
             logger.info('Training ended after %3d epochs.', epoch_no + 1)
-        metric_name = self.eval_metrics[0] \
-            if self.early_stopping_metric == "eval_metric" \
-            else self.early_stopping_metric
         logger.info('Best validation result (greedy) at step %8d: %6.2f %s.',
                     self.stats.best_ckpt_iter, self.stats.best_ckpt_score,
-                    metric_name)
+                    self.early_stopping_metric_name)
 
         self.tb_writer.close()  # close Tensorboard writer
 
@@ -697,7 +712,6 @@ class TrainManager:
 
         if self.batch_multiplier > 1:
             norm_batch_loss = norm_batch_loss / self.batch_multiplier
-            correct_tokens = correct_tokens / self.batch_multiplier
             for l in  auxiliary_losses.keys():
                 auxiliary_losses[l] = auxiliary_losses[l] / self.batch_multiplier
 
@@ -768,18 +782,20 @@ class TrainManager:
                 and self.scheduler_step_at == "validation":
             self.scheduler.step(ckpt_score)
 
-        new_best = False
-        if self.stats.is_best(ckpt_score):
+        # update new best
+        new_best = self.stats.is_best(ckpt_score)
+        if new_best:
             self.stats.best_ckpt_score = ckpt_score
             self.stats.best_ckpt_iter = self.stats.steps
             logger.info('Hooray! New best validation result [%s]!',
-                self.eval_metrics[0] \
-                if (self.early_stopping_metric == 'eval_metric') \
-                else self.early_stopping_metric)
-            new_best = True
-            self._save_checkpoint(new_best)
-        elif self.save_latest_checkpoint:
-            self._save_checkpoint(new_best)
+                        self.early_stopping_metric)
+
+        # save checkpoints
+        is_better = self.stats.is_better(ckpt_score, self.ckpt_queue) \
+            if len(self.ckpt_queue) > 0 else True
+        if self.keep_ckpts == "last" or \
+                (self.keep_ckpts == "best" and is_better):
+            self._save_checkpoint(new_best, ckpt_score)
 
         # append to validation report
         self._add_report(valid_scores=valid_scores,
@@ -819,8 +835,7 @@ class TrainManager:
                 sources=[s for s in valid_data.src] \
                     if self.task== "MT" else None,
                 indices=self.log_valid_sents,
-                output_prefix=os.path.join(
-                    self.model_dir, f"att.{self.stats.steps}"),
+                output_prefix=(self.model_dir / f"att.{self.stats.steps}").as_posix(),
                 tb_writer=self.tb_writer,
                 steps=self.stats.steps)
 
@@ -863,20 +878,6 @@ class TrainManager:
                     self.stats.steps, valid_loss, valid_ppl, valid_acc,
                     score_str, current_lr, "*" if new_best else ""))
 
-    def _log_parameters_list(self) -> None:
-        """
-        Write all model parameters (name, shape) to the log.
-        """
-        model_parameters = filter(lambda p: p.requires_grad,
-                                  self.model.parameters())
-        n_params = sum([np.prod(p.size()) for p in model_parameters])
-        logger.info("Total params: %d", n_params)
-        trainable_params = [
-            n for (n, p) in self.model.named_parameters() if p.requires_grad
-        ]
-        logger.debug("Trainable parameters: %s", sorted(trainable_params))
-        assert trainable_params
-
     def _log_examples(self,
                       hypotheses: List[str],
                       references: List[str],
@@ -918,9 +919,8 @@ class TrainManager:
 
         :param hypotheses: list of strings
         """
-        current_valid_output_file = os.path.join(self.model_dir,
-                                                 f"{self.stats.steps}.hyps")
-        with open(current_valid_output_file, 'w') as opened_file:
+        current_valid_output_file = self.model_dir/f"{self.stats.steps}.hyps"
+        with current_valid_output_file.open('w') as opened_file:
             for hyp in hypotheses:
                 opened_file.write("{}\n".format(hyp))
 
@@ -961,6 +961,14 @@ class TrainManager:
                 is_best = score > self.best_ckpt_score
             return is_best
 
+        def is_better(self, score, heap_queue):
+            assert len(heap_queue) > 0
+            if self.minimize_metric:
+                is_better = score < heapq.nsmallest(1, heap_queue)[0][0]
+            else:
+                is_better = score > heapq.nlargest(1, heap_queue)[0][0]
+            return is_better
+
 
 def train(cfg_file: str) -> None:
     """
@@ -969,13 +977,13 @@ def train(cfg_file: str) -> None:
     :param cfg_file: path to configuration yaml file
     """
     # read config file
-    cfg = load_config(cfg_file)
-    task = cfg["data"]["task"]  # "MT" or "s2t"
+    cfg = load_config(Path(cfg_file))
+    train_cfg = cfg["training"]
+    task = cfg["data"].get("task", "MT")  # "MT" or "s2t"
 
     # make logger
-    model_dir = make_model_dir(cfg["training"]["model_dir"],
-                               overwrite=cfg["training"].get(
-                                   "overwrite", False))
+    model_dir = make_model_dir(Path(train_cfg["model_dir"]),
+                               overwrite=train_cfg.get("overwrite", False))
     _ = make_logger(model_dir, mode="train")  # version string returned
     # TODO: save version number in model checkpoints
 
@@ -983,10 +991,10 @@ def train(cfg_file: str) -> None:
     log_cfg(cfg)
 
     # store copy of original training config in model dir
-    shutil.copy2(cfg_file, os.path.join(model_dir, "config.yaml"))
+    shutil.copy2(cfg_file, model_dir / "config.yaml")
 
     # set the random seed
-    set_seed(seed=cfg["training"].get("random_seed", 42))
+    set_seed(seed=train_cfg.get("random_seed", 42))
 
     # load the data
     train_data, dev_data, test_data, src_vocab, trg_vocab = load_data(
@@ -1001,20 +1009,15 @@ def train(cfg_file: str) -> None:
 
     # store the vocabs
     if task == "MT":
-        src_vocab_file = os.path.join(
-            cfg["training"]["model_dir"], "src_vocab.txt")
-        src_vocab.to_file(src_vocab_file)
-    trg_vocab_file = os.path.join(cfg["training"]["model_dir"], "trg_vocab.txt")
-    trg_vocab.to_file(trg_vocab_file)
+        src_vocab.to_file(model_dir/"src_vocab.txt")
+    trg_vocab.to_file(model_dir/"trg_vocab.txt")
 
     # train the model
     trainer.train_and_validate(train_data=train_data, valid_data=dev_data)
 
     # predict with the best model on validation and test
     # (if test data is available)
-    ckpt = os.path.join(model_dir, f"{trainer.stats.best_ckpt_iter}.ckpt")
-    output_name = "{:08d}.hyps".format(trainer.stats.best_ckpt_iter)
-    output_path = os.path.join(model_dir, output_name)
+    output_path = model_dir / "{:08d}.hyps".format(trainer.stats.best_ckpt_iter)
     datasets_to_test = {
         "dev": dev_data,
         "test": test_data,
@@ -1022,7 +1025,7 @@ def train(cfg_file: str) -> None:
         "trg_vocab": trg_vocab
     }
     test(cfg_file,
-         ckpt=ckpt,
+         ckpt=(model_dir/ f"{trainer.stats.best_ckpt_iter}.ckpt").as_posix(),
          output_path=output_path,
          datasets=datasets_to_test)
 

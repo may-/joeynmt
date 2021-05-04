@@ -3,15 +3,12 @@
 Collection of helper functions
 """
 import copy
-import glob
-import os
-import os.path
-import errno
 import shutil
 import random
 import logging
-from typing import Optional, List
-import pathlib
+from functools import partial
+from typing import Dict, Optional, List
+from pathlib import Path
 import numpy as np
 import pkg_resources
 import functools
@@ -32,7 +29,7 @@ class ConfigurationError(Exception):
     """ Custom exception for misspecifications of configuration """
 
 
-def make_model_dir(model_dir: str, overwrite=False) -> str:
+def make_model_dir(model_dir: Path, overwrite=False) -> str:
     """
     Create a new directory for the model.
 
@@ -40,17 +37,18 @@ def make_model_dir(model_dir: str, overwrite=False) -> str:
     :param overwrite: whether to overwrite an existing directory
     :return: path to model directory
     """
-    if os.path.isdir(model_dir):
+    model_dir = model_dir.absolute()
+    if model_dir.is_dir():
         if not overwrite:
             raise FileExistsError(
                 "Model directory exists and overwriting is disabled.")
         # delete previous directory to start with empty dir again
         shutil.rmtree(model_dir)
-    os.makedirs(model_dir)
+    model_dir.mkdir()
     return model_dir
 
 
-def make_logger(log_dir: str = None, mode: str = "train") -> str:
+def make_logger(log_dir: Path = None, mode: str = "train") -> str:
     """
     Create a logger for logging the training/testing process.
 
@@ -68,8 +66,8 @@ def make_logger(log_dir: str = None, mode: str = "train") -> str:
             '%(asctime)s - %(levelname)s - %(name)s - %(message)s')
 
         if log_dir is not None:
-            if os.path.exists(log_dir):
-                log_file = os.path.join(log_dir, f'{mode}.log')
+            if log_dir.is_dir():
+                log_file = log_dir / f'{mode}.log'
 
                 fh = logging.FileHandler(log_file)
                 fh.setLevel(level=logging.DEBUG)
@@ -178,14 +176,14 @@ def log_data_info(train_data: Dataset, valid_data: Dataset, test_data: Dataset,
     logger.info("Number of Trg words (types): %d", len(trg_vocab))
 
 
-def load_config(path="configs/default.yaml") -> dict:
+def load_config(path: Path = Path("configs/default.yaml")) -> dict:
     """
     Loads and parses a YAML configuration file.
 
     :param path: path to YAML configuration file
     :return: configuration dictionary
     """
-    with open(path, 'r') as ymlfile:
+    with path.open('r') as ymlfile:
         cfg = yaml.safe_load(ymlfile)
     return cfg
 
@@ -226,7 +224,6 @@ def store_attention_plots(attentions: np.array,
     :param indices: indices selected for plotting
     :param tb_writer: Tensorboard summary writer (optional)
     :param steps: current training steps, needed for tb_writer
-    :param dpi: resolution for images
     """
     for i in indices:
         if i >= len(sources):
@@ -259,7 +256,7 @@ def store_attention_plots(attentions: np.array,
             continue
 
 
-def get_latest_checkpoint(ckpt_dir: str) -> Optional[str]:
+def get_latest_checkpoint(ckpt_dir: Path) -> Optional[str]:
     """
     Returns the latest checkpoint (by time) from the given directory.
     If there is no checkpoint in this directory, returns None
@@ -267,10 +264,10 @@ def get_latest_checkpoint(ckpt_dir: str) -> Optional[str]:
     :param ckpt_dir:
     :return: latest checkpoint file
     """
-    list_of_files = glob.glob(os.path.join(ckpt_dir, "*.ckpt"))
+    list_of_files = ckpt_dir.glob("*.ckpt")
     latest_checkpoint = None
     if list_of_files:
-        latest_checkpoint = max(list_of_files, key=os.path.getctime)
+        latest_checkpoint = max(list_of_files, key=lambda f: f.stat().st_ctime)
 
     # check existence
     if latest_checkpoint is None:
@@ -279,16 +276,18 @@ def get_latest_checkpoint(ckpt_dir: str) -> Optional[str]:
     return latest_checkpoint
 
 
-def load_checkpoint(path: str, use_cuda: bool = True) -> dict:
+def load_checkpoint(path: Path, device: torch.device) -> Dict:
     """
     Load model from saved checkpoint.
 
     :param path: path to checkpoint
-    :param use_cuda: using cuda or not
+    :param device: using cuda or not
     :return: checkpoint (dict)
     """
-    assert os.path.isfile(path), "Checkpoint %s not found" % path
-    checkpoint = torch.load(path, map_location='cuda' if use_cuda else 'cpu')
+    logger = logging.getLogger(__name__)
+    assert path.is_file(), "Checkpoint %s not found" % path
+    checkpoint = torch.load(path.as_posix(), map_location=device)
+    logger.info("Load model from %s.", path.resolve())
     return checkpoint
 
 
@@ -334,7 +333,7 @@ def freeze_params(module: nn.Module) -> None:
     for _, p in module.named_parameters():
         p.requires_grad = False
 
-
+"""
 def symlink_update(target, link_name):
     try:
         os.symlink(target, link_name)
@@ -344,7 +343,7 @@ def symlink_update(target, link_name):
             os.symlink(target, link_name)
         else:
             raise e
-
+"""
 
 def delete_ckpt(to_delete: str) -> None:
     """
@@ -353,7 +352,7 @@ def delete_ckpt(to_delete: str) -> None:
     :param to_delete: filename of the checkpint to be deleted
     """
     try:
-        os.remove(to_delete)
+        to_delete.unlink()
     except FileNotFoundError as e:
         logger = logging.getLogger(__name__)
         logger.warning(
@@ -362,8 +361,7 @@ def delete_ckpt(to_delete: str) -> None:
         #raise e
 
 
-def latest_checkpoint_update(target: pathlib.Path,
-                             link_name: str) -> Optional[pathlib.Path]:
+def symlink_update(target: Path, link_name: Path) -> Optional[Path]:
     """
     This function finds the file that the symlink currently points to, sets it
     to the new target, and returns the previous target if it exists.
@@ -376,13 +374,12 @@ def latest_checkpoint_update(target: pathlib.Path,
             updated in this function. If the symlink did not exist before or did
             not have a target, None is returned instead.
     """
-    link = pathlib.Path(link_name)
-    if link.is_symlink():
-        current_last = link.resolve()
-        link.unlink()
-        link.symlink_to(target)
+    if link_name.is_symlink():
+        current_last = link_name.resolve()
+        link_name.unlink()
+        link_name.symlink_to(target)
         return current_last
-    link.symlink_to(target)
+    link_name.symlink_to(target)
     return None
 
 
@@ -421,13 +418,15 @@ def align_words_to_bpe(bpe_tokens: List[str], word_tokens: List[str],
     """
 
     # remove whitespaces/delimiters
-    bpe_tokens = [bpe_postprocess(str(x), bpe_type=bpe_type) for x in bpe_tokens]
-    word_tokens = [bpe_postprocess(str(w), bpe_type=bpe_type) for w in word_tokens]
+    postprocess = partial(bpe_postprocess, bpe_type=bpe_type)
+    bpe_tokens = [postprocess(str(x)) for x in bpe_tokens]
+    word_tokens = [postprocess(str(w)) for w in word_tokens]
     assert "".join(bpe_tokens) == "".join(word_tokens)
 
     # create alignment from every word to a list of BPE tokens
     words2bpe = []
-    bpe_toks = filter(lambda item: item[1] != "", enumerate(bpe_tokens, start=start))
+    bpe_toks = filter(lambda item: item[1] != "", enumerate(bpe_tokens,
+                                                            start=start))
     j, bpe_tok = next(bpe_toks)
     for word_tok in word_tokens:
         bpe_indices = []
@@ -445,7 +444,7 @@ def align_words_to_bpe(bpe_tokens: List[str], word_tokens: List[str],
                 bpe_tok = bpe_tok[len(word_tok) :]
                 word_tok = ""
             else:
-                raise Exception('Cannot align "{}" and "{}"'.format(word_tok, bpe_tok))
+                raise Exception(f'Cannot align "{word_tok}" and "{bpe_tok}"')
             if word_tok == "":
                 break
         assert len(bpe_indices) > 0

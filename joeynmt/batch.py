@@ -113,6 +113,7 @@ class SpeechBatch(Batch):
         self.bos_index = bos_index
         self.eos_index = eos_index
         self.is_train = kwargs["is_train"]
+        self.cmvn = kwargs.get("cmvn", None)
         if self.is_train:
             self.steps = kwargs["steps"] # number of updates so far
             self.batch_count = kwargs["batch_count"] # batch_count (will be reset in each epoch)
@@ -163,6 +164,14 @@ class SpeechBatch(Batch):
         if self.is_train:
             src, src_length, trg, trg_length = self._augment(
                 src, src_length, trg, trg_length, textgrids, word2bpe)
+
+        else:
+            if self.cmvn:
+                src_aug = src.copy()
+                for i in range(src.shape[0]):
+                    s_l = src_length[i]
+                    src_aug[i, :s_l, :] = self.cmvn(src_aug[i, :s_l, :])
+                src = src_aug
 
         return src, src_length, trg, trg_length
 

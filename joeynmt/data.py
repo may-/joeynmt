@@ -5,8 +5,7 @@ Data module
 import sys
 import random
 import csv
-import os
-import os.path
+from pathlib import Path
 from functools import partial
 from typing import Optional
 import logging
@@ -170,7 +169,7 @@ def load_data(data_cfg: dict, datasets: list = None)\
         logger.info("Loading test data...")
         if task == "MT":
             # check if target exists
-            if os.path.isfile(test_path + "." + trg_lang):
+            if Path(test_path + "." + trg_lang).is_file():
                 test_data = TranslationDataset(
                     path=test_path, exts=("." + src_lang, "." + trg_lang),
                     fields=(src_field, trg_field))
@@ -238,14 +237,14 @@ def make_data_iter(dataset: Dataset,
 
     if train:
         # optionally shuffle and sort during training
-        data_iter = data.BucketIterator(
+        data_iter = data.Iterator(
             repeat=False, sort=False, dataset=dataset,
             batch_size=batch_size, batch_size_fn=batch_size_fn,
             train=True, sort_within_batch=True,
             sort_key=lambda x: len(x.src), shuffle=shuffle)
     else:
         # don't sort/shuffle for validation/inference
-        data_iter = data.BucketIterator(
+        data_iter = data.Iterator(
             repeat=False, dataset=dataset,
             batch_size=batch_size, batch_size_fn=batch_size_fn,
             train=False, sort=False)
@@ -275,7 +274,7 @@ class MonoDataset(Dataset):
         if hasattr(path, "readline"):  # special usage: stdin
             src_file = path
         else:
-            src_path = os.path.expanduser(path + ext)
+            src_path = Path(path + ext).expanduser()
             src_file = open(src_path)
 
         examples = []
@@ -307,7 +306,7 @@ class SpeechDataset(TranslationDataset):
         :param is_train: bool
         """
         assert isinstance(fields, list) and isinstance(fields[0], tuple)
-        root_path = os.path.expanduser(root_path)
+        root_path = Path(root_path).expanduser()
         headers = [name for name, _ in fields]
         if "textgrid" in headers:
             frame_shift = kwargs.get("frame_shift", 100)
@@ -346,11 +345,11 @@ class SpeechDataset(TranslationDataset):
         # 116-288045-2	fbank80/116-288045-2.npy	961	▁he ▁must ▁have ▁realize d ▁i ▁was ▁a ▁stranger
         #
         #########################################
-        tsv_path = os.path.join(root_path, f"{tsv_file}.tsv")
-        if not os.path.isfile(tsv_path):
+        tsv_path = Path(root_path) / f"{tsv_file}.tsv"
+        if not tsv_path.is_file():
             raise FileNotFoundError(f"Dataset not found: {tsv_path}")
         examples = []
-        with open(tsv_path) as f:
+        with tsv_path.open('r') as f:
             reader = csv.DictReader(
                 f,
                 delimiter="\t",
@@ -364,12 +363,12 @@ class SpeechDataset(TranslationDataset):
                     assert 'src' in dic.keys() and 'n_frames' in dic.keys()
                     example = dict()
                     _id = dic['id'] if 'id' in dic.keys() else i
-                    example['src'] = SpeechInstance(os.path.join(root_path, dic['src']),
+                    example['src'] = SpeechInstance((Path(root_path)/dic['src']).as_posix(),
                                                     int(dic['n_frames']), str(_id))
                     if 'trg' in headers:
                         example['trg'] = dic['trg']
                     if 'textgrid' in headers and 'trg_text' in dic.keys():
-                        textgrid_path = os.path.join(root_path, dic['textgrid'])
+                        textgrid_path = Path(root_path) / dic['textgrid']
                         words = dic['trg_text'].lower()
                         example['textgrid'] = get_textgrid(textgrid_path, words, frame_shift=frame_shift)
                         example['word2bpe'] = align_words_to_bpe(dic['trg'].split(), words.split(), start=1)

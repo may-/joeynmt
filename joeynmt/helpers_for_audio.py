@@ -3,8 +3,7 @@
 Collection of helper functions for audio processing
 """
 
-import os
-import os.path
+from pathlib import Path
 import io
 import logging
 
@@ -38,9 +37,8 @@ def _is_npy_data(data: bytes) -> bool:
     return data[0] == 147 and data[1] == 78
 
 # from fairseq
-def _get_features_from_zip(path, byte_offset, byte_size):
-    assert path.endswith(".zip")
-    with open(path, "rb") as f:
+def _get_features_from_zip(path: Path, byte_offset: int, byte_size: int):
+    with path.open("rb") as f:
         f.seek(byte_offset)
         data = f.read(byte_size)
     byte_features = io.BytesIO(data)
@@ -51,27 +49,22 @@ def _get_features_from_zip(path, byte_offset, byte_size):
     return features
 
 # from fairseq
-def get_features(path):
+def get_features(path: str):
     """Get speech features from ZIP file
        accessed via byte offset and length
 
     :return: (np.ndarray) speech features in shape of (num_frames, num_freq)
     """
     _path, *extra = path.split(":")
-    if not os.path.exists(_path):
+    _path = Path(_path)
+    if not _path.is_file():
         raise FileNotFoundError(f"File not found: {_path}")
 
-    if len(extra) == 0:
-        ext = os.path.splitext(os.path.basename(_path))[1]
-        if ext == ".npy":
-            features = np.load(_path)
-        else:
-            raise ValueError(f"Invalid file type: {_path}")
-    elif len(extra) == 2:
+    if len(extra) == 0 and _path.suffix == ".npy":
+        features = np.load(_path)
+    elif len(extra) == 2 and _path.suffix == ".zip":
         extra = [int(i) for i in extra]
-        features = _get_features_from_zip(
-            _path, extra[0], extra[1]
-        )
+        features = _get_features_from_zip(_path, extra[0], extra[1])
     else:
         raise ValueError(f"Invalid path: {path}")
     return features
@@ -115,7 +108,7 @@ def pad_features(batch, embed_size=80, max_len=None):
 
 
 def get_textgrid(textgrid_path, trg, frame_shift=100, return_phn=False):
-    if not os.path.isfile(textgrid_path):
+    if not textgrid_path.is_file():
         raise FileNotFoundError(f"TextGrid not found: {textgrid_path}")
     textgrid = TextGrid.fromFile(textgrid_path)
 
@@ -171,4 +164,3 @@ def get_textgrid(textgrid_path, trg, frame_shift=100, return_phn=False):
             wrd2phn[k] = ' '.join([alignments['phones'][phn][-1] for phn in dic[j]])
 
         return alignments, wrd2phn
-

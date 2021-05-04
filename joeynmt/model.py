@@ -75,7 +75,7 @@ class Model(nn.Module):
         model.__call__() triggers model.forward() together with pre hooks
         and post hooks, which take care of multi-gpu distribution.
 
-        :param return_type: one of {"loss", "encode", "decode"}
+        :param return_type: one of {"loss", "encode", "decode", "decode_ctc"}
         """
         if return_type is None:
             raise ValueError("Please specify return_type: "
@@ -222,8 +222,8 @@ class Model(nn.Module):
                "\tsrc_embed=%s,\n" \
                "\ttrg_embed=%s,\n" \
                "\tloss_function=%r\n)" % (self.__class__.__name__, self.encoder,
-                                    self.decoder, self.src_embed,
-                                    self.trg_embed, self.loss_function)
+                                          self.decoder, self.src_embed,
+                                          self.trg_embed, self.loss_function)
 
     def log_parameters_list(self):
         """
@@ -264,9 +264,12 @@ def build_model(cfg: dict = None,
     src_padding_idx = src_vocab.stoi[PAD_TOKEN] if task == "MT" else None
     trg_padding_idx = trg_vocab.stoi[PAD_TOKEN]
 
-    src_embed = Embeddings(
-        **cfg["encoder"]["embeddings"], vocab_size=len(src_vocab),
-        padding_idx=src_padding_idx) if task == "MT" else None
+    enc_cfg = cfg["encoder"]
+    dec_cfg = cfg["decoder"]
+
+    src_embed = Embeddings(**enc_cfg["embeddings"],
+                           vocab_size=len(src_vocab),
+                           padding_idx=src_padding_idx) if task == "MT" else None
 
     # this ties source and target embeddings
     # for softmax layer tying, see further below
@@ -278,43 +281,42 @@ def build_model(cfg: dict = None,
             raise ConfigurationError(
                 "Embedding cannot be tied since vocabularies differ.")
     else:
-        trg_embed = Embeddings(
-            **cfg["decoder"]["embeddings"], vocab_size=len(trg_vocab),
-            padding_idx=trg_padding_idx)
+        trg_embed = Embeddings(**dec_cfg["embeddings"],
+                               vocab_size=len(trg_vocab),
+                               padding_idx=trg_padding_idx)
 
     # build encoder
-    enc_dropout = cfg["encoder"].get("dropout", 0.)
-    enc_emb_dropout = cfg["encoder"]["embeddings"].get("dropout", enc_dropout)
-    if cfg["encoder"].get("type", "recurrent") == "transformer":
+    enc_dropout = enc_cfg.get("dropout", 0.)
+    enc_emb_dropout = enc_cfg["embeddings"].get("dropout", enc_dropout)
+    if enc_cfg.get("type", "recurrent") == "transformer":
         if task == "MT":
-            assert cfg["encoder"]["embeddings"]["embedding_dim"] == \
-                   cfg["encoder"]["hidden_size"], \
+            assert enc_cfg["embeddings"]["embedding_dim"] == enc_cfg["hidden_size"], \
                    "for transformer, emb_size must be hidden_size"
             emb_size = src_embed.embedding_dim
         else:
-            emb_size = cfg["encoder"]["embeddings"]["embedding_dim"]
+            emb_size = enc_cfg["embeddings"]["embedding_dim"]
             # must be same as num_freq
-        encoder = TransformerEncoder(**cfg["encoder"],
+        encoder = TransformerEncoder(**enc_cfg,
                                      emb_size=emb_size,
                                      emb_dropout=enc_emb_dropout)
     else:
         assert task == "MT", "recurrent model not supported for s2t task. use transformer."
-        encoder = RecurrentEncoder(**cfg["encoder"],
+        encoder = RecurrentEncoder(**enc_cfg,
                                    emb_size=src_embed.embedding_dim,
                                    emb_dropout=enc_emb_dropout)
 
     # build decoder
-    dec_dropout = cfg["decoder"].get("dropout", 0.)
-    dec_emb_dropout = cfg["decoder"]["embeddings"].get("dropout", dec_dropout)
-    if cfg["decoder"].get("type", "recurrent") == "transformer":
+    dec_dropout = dec_cfg.get("dropout", 0.)
+    dec_emb_dropout = dec_cfg["embeddings"].get("dropout", dec_dropout)
+    if dec_cfg.get("type", "recurrent") == "transformer":
         dec_kwargs = {"encoder_output_size_for_ctc": encoder._output_size}
         decoder = TransformerDecoder(
-            **cfg["decoder"], encoder=encoder, vocab_size=len(trg_vocab),
+            **dec_cfg, encoder=encoder, vocab_size=len(trg_vocab),
             emb_size=trg_embed.embedding_dim, emb_dropout=dec_emb_dropout, **dec_kwargs)
     else:
         assert task == "MT", "recurrent model not supported for s2t task. use transformer."
         decoder = RecurrentDecoder(
-            **cfg["decoder"], encoder=encoder, vocab_size=len(trg_vocab),
+            **dec_cfg, encoder=encoder, vocab_size=len(trg_vocab),
             emb_size=trg_embed.embedding_dim, emb_dropout=dec_emb_dropout)
 
     model = Model(encoder=encoder, decoder=decoder,
@@ -330,16 +332,16 @@ def build_model(cfg: dict = None,
         else:
             raise ConfigurationError(
                 "For tied_softmax, the decoder embedding_dim and decoder "
-                "hidden_size must be the same."
+                "hidden_size must be the same. "
                 "The decoder must be a Transformer.")
 
     # custom initialization of model parameters
     initialize_model(model, cfg, src_padding_idx, trg_padding_idx)
 
     # initialize embeddings from file
-    pretrained_enc_embed_path = cfg["encoder"]["embeddings"].get(
+    pretrained_enc_embed_path = enc_cfg["embeddings"].get(
         "load_pretrained", None)
-    pretrained_dec_embed_path = cfg["decoder"]["embeddings"].get(
+    pretrained_dec_embed_path = dec_cfg["embeddings"].get(
         "load_pretrained", None)
     if pretrained_enc_embed_path:
         logger.info("Loading pretraind src embeddings...")

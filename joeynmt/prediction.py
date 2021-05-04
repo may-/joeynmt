@@ -2,7 +2,7 @@
 """
 This modules holds methods for generating predictions from a model.
 """
-import os
+from pathlib import Path
 import sys
 from typing import List, Optional
 from collections import defaultdict
@@ -226,6 +226,8 @@ def parse_test_args(cfg, mode="test"):
 
     batch_size = cfg["training"].get(
         "eval_batch_size", cfg["training"].get("batch_size", 1))
+    k = cfg["testing"].get("beam_size", 1)
+    batch_size = batch_size // k # avoid out-of-memory error
     batch_type = cfg["training"].get(
         "eval_batch_type", cfg["training"].get("batch_type", "sentence"))
     use_cuda = (cfg["training"].get("use_cuda", False)
@@ -233,7 +235,6 @@ def parse_test_args(cfg, mode="test"):
     device = torch.device("cuda" if use_cuda else "cpu")
     if mode == 'test':
         n_gpu = torch.cuda.device_count() if use_cuda else 0
-        k = cfg["testing"].get("beam_size", 1)
         batch_per_device = batch_size*k // n_gpu if n_gpu > 1 else batch_size*k
         logger.info("Process device: %s, n_gpu: %d, "
                     "batch_size per device: %d (with beam_size)",
@@ -287,15 +288,14 @@ def parse_test_args(cfg, mode="test"):
             "tokenize": "13a",
             "tok_fun": lambda s: list(s) if level=="char" else s.split()}
 
-    decoding_description = "Greedy decoding" if beam_size < 2 else \
-        "Beam search decoding with beam size = {} and alpha = {}". \
-            format(beam_size, beam_alpha)
+    decoding_desc = "Greedy decoding" if beam_size < 2 else \
+        f"Beam search decoding with beam size = {beam_size} and alpha = {beam_alpha}"
     tokenizer_info = f"{sacrebleu['tokenize']}" \
         if "bleu" in eval_metrics or "wer" in eval_metrics else ""
 
     return batch_size, batch_type, use_cuda, device, n_gpu, level, \
            eval_metrics, max_output_length, beam_size, beam_alpha, \
-           postprocess, bpe_type, sacrebleu, decoding_description, tokenizer_info
+           postprocess, bpe_type, sacrebleu, decoding_desc, tokenizer_info
 
 
 # pylint: disable-msg=logging-too-many-args,too-many-branches
@@ -315,8 +315,8 @@ def test(cfg_file,
     :param save_attention: whether to save the computed attention weights
     """
 
-    cfg = load_config(cfg_file)
-    model_dir = cfg["training"]["model_dir"]
+    cfg = load_config(Path(cfg_file))
+    model_dir = Path(cfg["training"]["model_dir"])
     task = cfg["data"].get("task", "MT")
 
     if len(logger.handlers) == 0:
@@ -324,11 +324,14 @@ def test(cfg_file,
 
     # when checkpoint is not specified, take latest (best) from model dir
     if ckpt is None:
-        ckpt = get_latest_checkpoint(model_dir)
-        try:
-            step = os.path.split(ckpt)[1].split(".ckpt")[0]
-        except IndexError:
-            step = "best"
+        ckpt = cfg["training"].get("load_model", None)
+        if ckpt is None:
+            if (model_dir / "best.ckpt").is_file():
+                ckpt = model_dir / "best.ckpt"
+            else:
+                ckpt = get_latest_checkpoint(model_dir)
+    else:
+        ckpt = Path(ckpt)
 
     # load the data
     if datasets is None:
@@ -343,10 +346,10 @@ def test(cfg_file,
     # parse test args
     batch_size, batch_type, use_cuda, device, n_gpu, level, eval_metrics, \
     max_output_length, beam_size, beam_alpha, postprocess, bpe_type, \
-    sacrebleu, decoding_description, tokenizer_info = parse_test_args(cfg, mode="test")
+    sacrebleu, decoding_desc, tokenizer_info = parse_test_args(cfg, mode="test")
 
     # load model state from disk
-    model_checkpoint = load_checkpoint(ckpt, use_cuda=use_cuda)
+    model_checkpoint = load_checkpoint(ckpt, device=device)
 
     # build model
     model = build_model(cfg["model"], src_vocab=src_vocab, trg_vocab=trg_vocab)
@@ -408,15 +411,15 @@ def test(cfg_file,
                 if eval_metric in ["bleu", "wer"]:
                     info_str += f"[{tokenizer_info}]"
                 info_str += " : %6.2f" % (scores[eval_metric])
-            logger.info("%s (%s)", info_str, decoding_description)
+            logger.info("%s (%s)", info_str, decoding_desc)
         else:
             logger.info("No references given for %s -> no evaluation.",
                         data_set_name)
 
         if save_attention:
             if attention_scores:
-                attention_name = "{}.{}.att".format(data_set_name, step)
-                attention_path = os.path.join(model_dir, attention_name)
+                attention_name = f"{data_set_name}.{ckpt.stem}.att"
+                attention_path = (model_dir / attention_name).as_posix()
                 logger.info("Saving attention plots. This might take a while..")
                 store_attention_plots(attentions=attention_scores,
                                       targets=hypotheses_raw,
@@ -467,8 +470,8 @@ def translate(cfg_file: str,
                                 field=src_field)
 
         # remove temporary file
-        if os.path.exists(tmp_filename):
-            os.remove(tmp_filename)
+        if tmp_filename.is_file():
+            tmp_filename.unlink()
 
         return test_data
 
@@ -487,7 +490,7 @@ def translate(cfg_file: str,
         return hypotheses
 
     cfg = load_config(cfg_file)
-    model_dir = cfg["training"]["model_dir"]
+    model_dir = Path(cfg["training"]["model_dir"])
     task = cfg["data"].get("task", "MT")
     assert task == "MT", "Interactive mode is supported only for MT task. Abort."
 
@@ -496,15 +499,20 @@ def translate(cfg_file: str,
 
     # when checkpoint is not specified, take oldest from model dir
     if ckpt is None:
-        ckpt = get_latest_checkpoint(model_dir)
+        ckpt = cfg["training"].get("load_model", None)
+        if ckpt is None:
+            if (model_dir / "best.ckpt").is_file():
+                ckpt = model_dir / "best.ckpt"
+            else:
+                ckpt = get_latest_checkpoint(model_dir)
+    else:
+        ckpt = Path(ckpt)
 
     # read vocabs
     if task == "MT":
-        src_vocab_file = cfg["data"].get(
-            "src_vocab", os.path.join(model_dir, "src_vocab.txt"))
+        src_vocab_file = cfg["data"].get("src_vocab", model_dir/"src_vocab.txt")
         src_vocab = Vocabulary(file=src_vocab_file)
-    trg_vocab_file = cfg["data"].get(
-        "trg_vocab", os.path.join(model_dir, "trg_vocab.txt"))
+    trg_vocab_file = cfg["data"].get("trg_vocab", model_dir/"trg_vocab.txt")
     trg_vocab = Vocabulary(file=trg_vocab_file)
 
     data_cfg = cfg["data"]

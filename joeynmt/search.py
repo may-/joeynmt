@@ -266,7 +266,7 @@ def beam_search(model: Model, size: int,
         "gold_score": [0] * batch_size,
     }
     is_finished = torch.full(
-        [batch_size, beam_width],
+        [batch_size, size],
         False,
         dtype=torch.bool,
         device=device,

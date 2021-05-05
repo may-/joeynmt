@@ -1,0 +1,107 @@
+name: "transformer-mustc-mt"
+
+data:
+    task: "MT"
+    src: "en"
+    trg: "de"
+    train: "/scratch5t/ohta/MUSTC_v2.0/en-de/train_spm20000"
+    dev: "/scratch5t/ohta/MUSTC_v2.0/en-de/dev_spm20000"
+    test: "/scratch5t/ohta/MUSTC_v2.0/en-de/tst-COMMON_spm20000"
+    level: "bpe"
+    lowercase: False
+    max_sent_length: 120
+    src_voc_min_freq: 1
+    src_voc_limit: 20000
+    trg_voc_min_freq: 1
+    trg_voc_limit: 20000
+    src_vocab: "/scratch5t/ohta/MUSTC_v2.0/en-de/spm_unigram20000.txt"
+    trg_vocab: "/scratch5t/ohta/MUSTC_v2.0/en-de/spm_unigram20000.txt"
+
+testing:
+    beam_size: 10
+    alpha: 1.0
+    postproccess: True
+    bpe_type: "sentencepiece"
+    sacrebleu:
+        remove_whitespace: True
+        tokenize: "13a"
+
+training:
+    load_model: "/scratch12t/ohta/models/mustc_mt_seed123/best.ckpt"
+    reset_best_ckpt: False
+    reset_scheduler: False
+    reset_optimizer: False
+    reset_iter_state: False
+    random_seed: 123
+    optimizer: "adam"
+    adam_betas: [0.9, 0.99]
+    loss: "crossentropy"
+    scheduling: "warmupinversesquareroot"
+    learning_rate: 2.0e-3
+    learning_rate_min: 1.0e-6
+    learning_rate_warmup: 10000
+    clip_grad_norm: 10.0
+    weight_decay: 0.0
+    label_smoothing: 0.1
+    batch_multiplier: 4
+    normalization: "batch"
+    batch_size: 8192
+    batch_type: "token"
+    early_stopping_metric: "eval_metric"
+    epochs: 200
+    updates: 100000
+    validation_freq: 1000
+    logging_freq: 100
+    eval_metrics: "bleu"
+    model_dir: "/scratch12t/ohta/models/mustc_mt_seed123"
+    overwrite: False
+    shuffle: True
+    use_cuda: True
+    fp16: False
+    max_output_length: 120
+    print_valid_sents: [0, 1, 2]
+    keep_ckpts: "best"
+    num_ckpts: -1
+    num_workers: 4
+
+model:
+    initializer: "xavier"
+    init_gain: 1.0
+    embed_initializer: "xavier"
+    embed_init_gain: 1.0
+    bias_initializer: "zeros"
+    tied_embeddings: True
+    tied_softmax: False
+    encoder:
+        type: "transformer"
+        num_layers: 12
+        num_heads: 8
+        embeddings:
+            #embedding_dim: 80
+            embedding_dim: 512
+            scale: True
+            dropout: 0.
+            freeze: False
+        # typically ff_size = 8 x hidden_size
+        hidden_size: 512
+        ff_size: 2048
+        dropout: 0.15
+        freeze: False
+        #subsample: True
+        #conv_kernel_sizes: 5,5
+        #conv_channels: 512
+        #in_channels: 80
+    decoder:
+        type: "transformer"
+        num_layers: 6
+        num_heads: 8
+        embeddings:
+            embedding_dim: 512
+            scale: True
+            dropout: 0.
+            freeze: False
+        # ff_size = 8 x hidden_size
+        hidden_size: 512
+        ff_size: 2048
+        dropout: 0.15
+        freeze: False

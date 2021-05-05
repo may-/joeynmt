@@ -329,7 +329,7 @@ def test(cfg_file,
 
     # when checkpoint is not specified, take latest (best) from model dir
     if ckpt is None:
-        ckpt = cfg["training"].get("load_model", None)
+        ckpt = Path(cfg["training"].get("load_model", None))
         if ckpt is None:
             if (model_dir / "best.ckpt").is_file():
                 ckpt = model_dir / "best.ckpt"

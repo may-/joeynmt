@@ -652,7 +652,7 @@ class TrainManager:
                         self.stats.total_batches - epoch_batches)
 
             # reset stats
-            if self.audio_dict is not None:
+            if self.task == "st" and self.audio_dict is not None:
                 self.audio_dict.reset_stats()
         else:
             logger.info('Training ended after %3d epochs.', epoch_no + 1)

@@ -15,7 +15,7 @@ class Batch:
     Input is a batch from a torch text iterator.
     """
     # pylint: disable=too-many-instance-attributes
-    def __init__(self, torch_batch, pad_index, use_cuda=False, **kwargs):
+    def __init__(self, torch_batch, pad_index, bos_index, eos_index, use_cuda=False, **kwargs):
         """
         Create a new joey batch from a torch batch.
         This batch extends torch text's batch attributes with src and trg

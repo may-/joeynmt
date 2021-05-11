@@ -4,9 +4,9 @@ data:
     task: "MT"
     src: "en"
     trg: "de"
-    train: "/scratch5t/ohta/MUSTC_v2.0/en-de/train_spm20000"
-    dev: "/scratch5t/ohta/MUSTC_v2.0/en-de/dev_spm20000"
-    test: "/scratch5t/ohta/MUSTC_v2.0/en-de/tst-COMMON_spm20000"
+    train: "~/MUSTC_v2.0/en-de/train_spm20000"
+    dev: "~/MUSTC_v2.0/en-de/dev_spm20000"
+    test: "~/MUSTC_v2.0/en-de/tst-COMMON_spm20000"
     level: "bpe"
     lowercase: False
     max_sent_length: 120
@@ -14,8 +14,8 @@ data:
     src_voc_limit: 20000
     trg_voc_min_freq: 1
     trg_voc_limit: 20000
-    src_vocab: "/scratch5t/ohta/MUSTC_v2.0/en-de/spm_unigram20000.txt"
-    trg_vocab: "/scratch5t/ohta/MUSTC_v2.0/en-de/spm_unigram20000.txt"
+    src_vocab: "~/MUSTC_v2.0/en-de/spm_unigram20000.txt"
+    trg_vocab: "~/MUSTC_v2.0/en-de/spm_unigram20000.txt"
 
 testing:
     beam_size: 10
@@ -27,12 +27,12 @@ testing:
         tokenize: "13a"
 
 training:
-    load_model: "/scratch12t/ohta/models/mustc_mt_seed123/best.ckpt"
+    load_model: "models/mustc_v2_mt/best.ckpt"
     reset_best_ckpt: False
     reset_scheduler: False
     reset_optimizer: False
     reset_iter_state: False
-    random_seed: 123
+    random_seed: 42
     optimizer: "adam"
     adam_betas: [0.9, 0.99]
     loss: "crossentropy"
@@ -53,7 +53,7 @@ training:
     validation_freq: 1000
     logging_freq: 100
     eval_metrics: "bleu"
-    model_dir: "/scratch12t/ohta/models/mustc_mt_seed123"
+    model_dir: "models/mustc_v2_mt"
     overwrite: False
     shuffle: True
     use_cuda: True

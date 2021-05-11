@@ -13,6 +13,7 @@ import numpy as np
 import pkg_resources
 import functools
 import operator
+import yaml
 
 import torch
 from torch import nn, Tensor
@@ -20,7 +21,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.nn.functional import pad as _pad
 
 from torchtext.legacy.data import Dataset
-import yaml
+
 from joeynmt.vocabulary import Vocabulary
 from joeynmt.plotting import plot_heatmap
 
@@ -120,8 +121,8 @@ def subsequent_mask(size: int) -> Tensor:
     :param size: size of mask (2nd and 3rd dim)
     :return: Tensor with 0s and 1s of shape (1, size, size)
     """
-    mask = np.triu(np.ones((1, size, size)), k=1).astype('uint8')
-    return torch.from_numpy(mask) == 0
+    ones = torch.ones(size, size, dtype=torch.bool)
+    return torch.tril(ones, out=ones).unsqueeze(0)
 
 
 def set_seed(seed: int) -> None:
@@ -163,7 +164,8 @@ def log_data_info(train_data: Dataset, valid_data: Dataset, test_data: Dataset,
     #    len(test_data) if test_data is not None else 0)
 
     if train_data:
-        src_sentence = "\n\t[SRC] " + " ".join(vars(train_data[0])['src']) if src_vocab else ""
+        src_sentence = "\n\t[SRC] " + " ".join(vars(train_data[0])['src']) \
+            if src_vocab else ""
         logger.info("First training example:%s\n\t[TRG] %s",
                     src_sentence, " ".join(vars(train_data[0])['trg']))
     if src_vocab:
@@ -333,17 +335,6 @@ def freeze_params(module: nn.Module) -> None:
     for _, p in module.named_parameters():
         p.requires_grad = False
 
-"""
-def symlink_update(target, link_name):
-    try:
-        os.symlink(target, link_name)
-    except FileExistsError as e:
-        if e.errno == errno.EEXIST:
-            os.remove(link_name)
-            os.symlink(target, link_name)
-        else:
-            raise e
-"""
 
 def delete_ckpt(to_delete: str) -> None:
     """
@@ -394,11 +385,13 @@ def pad(x, max_len, pad_index, dim=1):
     if dim == 1:
         batch_size, seq_len, _ = x.size()
         offset = max_len - seq_len
-        new_x = _pad(x, (0, 0, 0, offset, 0, 0), "constant", pad_index) if x.size(1) < max_len else x
+        new_x = _pad(x, (0, 0, 0, offset, 0, 0), "constant", pad_index) \
+            if x.size(1) < max_len else x
     elif dim == -1:
         batch_size, _, seq_len = x.size()
         offset = max_len - seq_len
-        new_x = _pad(x, (0, offset), "constant", pad_index) if x.size(1) < max_len else x
+        new_x = _pad(x, (0, offset), "constant", pad_index) \
+            if x.size(1) < max_len else x
     assert new_x.size(dim) == max_len, (x.size(), offset, new_x.size(), max_len)
     return new_x
 

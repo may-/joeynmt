@@ -158,20 +158,21 @@ class SpeechBatch(Batch):
     def _read(self, torch_batch):
         (src, src_length) = torch_batch.src
         (trg, trg_length) = torch_batch.trg if hasattr(torch_batch, "trg") else (None, None)
-        textgrids = torch_batch.textgrid if hasattr(torch_batch, "textgrid") else None
-        word2bpe = torch_batch.word2bpe if hasattr(torch_batch, "word2bpe") else None
+        #textgrids = torch_batch.textgrid if hasattr(torch_batch, "textgrid") else None
+        #word2bpe = torch_batch.word2bpe if hasattr(torch_batch, "word2bpe") else None
 
-        if self.is_train:
-            src, src_length, trg, trg_length = self._augment(
-                src, src_length, trg, trg_length, textgrids, word2bpe)
-
-        else:
-            if self.cmvn:
-                src_aug = src.copy()
-                for i in range(src.shape[0]):
-                    s_l = src_length[i]
+        if self.cmvn or (self.is_train and self.specaugment):
+            src_aug = src.copy()
+            for i in range(src.shape[0]):
+                s_l = src_length[i]
+                if self.cmvn and self.cmvn.apply_before:
                     src_aug[i, :s_l, :] = self.cmvn(src_aug[i, :s_l, :])
-                src = src_aug
+
+                if self.is_train and self.specaugment:
+                    src_aug[i, :s_l, :] = self.specaugment(src_aug[i, :s_l, :])
+
+                if self.cmvn and (not self.cmvn.apply_before):
+                    src_aug[i, :s_l, :] = self.cmvn(src_aug[i, :s_l, :])
 
         return src, src_length, trg, trg_length
 

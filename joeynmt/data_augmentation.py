@@ -88,9 +88,11 @@ class CMVN:
     (Utterance-level)
     """
 
-    def __init__(self, norm_means: bool = True, norm_vars: bool = True):
+    def __init__(self, norm_means: bool = True, norm_vars: bool = True,
+                 before: bool = True):
         self.norm_means = norm_means
         self.norm_vars = norm_vars
+        self.apply_before = before
 
     def __call__(self, x: np.ndarray) -> np.ndarray:
         orig_shape = x.shape
@@ -109,7 +111,9 @@ class CMVN:
 
     def __repr__(self):
         return (self.__class__.__name__ +
-                f"(norm_means={self.norm_means}, norm_vars={self.norm_vars})")
+                f"(norm_means={self.norm_means}, "
+                f"norm_vars={self.norm_vars}, "
+                f"before={self.apply_before})")
 
 
 class Sampler(object):

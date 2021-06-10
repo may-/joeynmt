@@ -3,9 +3,9 @@ name: "iwslt14-deen-bpe-transformer"
 data:
     src: "de"
     trg: "en"
-    train: "test/data/iwslt14_sp/train.sp.32000"
-    dev: "test/data/iwslt14_sp/valid.sp.32000"
-    test: "test/data/iwslt14_sp/test.sp.32000"
+    train: "test/data/iwslt14_sp/train.sp.25000"
+    dev: "test/data/iwslt14_sp/valid.sp.25000"
+    test: "test/data/iwslt14_sp/test.sp.25000"
     level: "bpe"
     lowercase: True
     max_sent_length: 62
@@ -22,7 +22,7 @@ testing:
         tokenize: "13a"
 
 training:
-    random_seed: 42
+    random_seed: 123
     optimizer: "adam"
     normalization: "tokens"
     adam_betas: [0.9, 0.999]
@@ -41,11 +41,11 @@ training:
     validation_freq: 1000
     logging_freq: 100
     eval_metric: "bleu"
-    model_dir: "models/iwslt14_deen_sp_transformer_2gpu_fp16"
+    model_dir: "models/iwslt14_deen_sp_transformer"
     overwrite: True
     shuffle: True
     use_cuda: True
-    fp16: True
+    fp16: False
     max_output_length: 100
     print_valid_sents: [0, 1, 2, 3, 4]
     keep_best_ckpts: 5
